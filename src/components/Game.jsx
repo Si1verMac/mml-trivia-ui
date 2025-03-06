@@ -8,11 +8,12 @@ const Game = ({ token, setGameId, gameId, onLogout }) => {
   const decodedToken = jwtDecode(token)
   const teamId = parseInt(decodedToken.teamId)
 
-  const [phase, setPhase] = useState('idle')
+  // State variables for game flow and UI
+  const [phase, setPhase] = useState('idle') // idle, wager, waitingForQuestion, question, waitingForResults, reveal
   const [round, setRound] = useState(1)
   const [questionNumber, setQuestionNumber] = useState(1)
-  const [usedWagers, setUsedWagers] = useState([])
   const [selectedWager, setSelectedWager] = useState(null)
+  const [wagerSubmitted, setWagerSubmitted] = useState(false)
   const [questionText, setQuestionText] = useState('')
   const [answerOptions, setAnswerOptions] = useState([])
   const [answer, setAnswer] = useState('')
@@ -20,20 +21,20 @@ const Game = ({ token, setGameId, gameId, onLogout }) => {
   const [currentQuestionId, setCurrentQuestionId] = useState(null)
   const [timeLeft, setTimeLeft] = useState(0)
   const [connectionError, setConnectionError] = useState(null)
-  const [hubConnection, setHubConnection] = useState(null)
   const [reconnecting, setReconnecting] = useState(false)
 
-  // Use ref to track join status per gameId
+  // useRef for the SignalR connection and join status
+  const hubConnectionRef = useRef(null)
   const joinedGamesRef = useRef({})
 
-  // SignalR connection setup with reconnection logic
+  // SignalR connection setup – runs when gameId, token, or teamId change
   useEffect(() => {
     if (!gameId) return
 
-    // Reuse existing connection if connected and joined
+    // If we already have a connection and have joined this game, skip setup
     if (
-      hubConnection &&
-      hubConnection.state === signalR.HubConnectionState.Connected &&
+      hubConnectionRef.current &&
+      hubConnectionRef.current.state === signalR.HubConnectionState.Connected &&
       joinedGamesRef.current[gameId]
     ) {
       console.log(
@@ -45,34 +46,42 @@ const Game = ({ token, setGameId, gameId, onLogout }) => {
 
     // Stop any existing connection before starting a new one
     if (
-      hubConnection &&
-      hubConnection.state !== signalR.HubConnectionState.Disconnected
+      hubConnectionRef.current &&
+      hubConnectionRef.current.state !== signalR.HubConnectionState.Disconnected
     ) {
-      hubConnection
+      hubConnectionRef.current
         .stop()
         .then(() => console.log('Previous connection stopped before new setup'))
         .catch((err) =>
           console.error('Error stopping previous connection:', err)
         )
+      hubConnectionRef.current = null
     }
 
+    // Create a new connection – forcing LongPolling to avoid WebSocket issues
     const connection = new signalR.HubConnectionBuilder()
       .withUrl('https://localhost:7169/triviaHub', {
         accessTokenFactory: () => token,
+        transport: signalR.HttpTransportType.LongPolling,
       })
       .configureLogging(signalR.LogLevel.Information)
-      .withAutomaticReconnect() // Enables automatic reconnection with default retry intervals
+      .withAutomaticReconnect()
       .build()
 
     console.log('Creating SignalR connection, state:', connection.state)
 
     // Event handlers
     connection.on('TeamJoined', (gameTeam) => {
-      console.log('Team Joined:', gameTeam)
+      console.log('TeamJoined:', gameTeam)
       joinedGamesRef.current[gameId] = true
       setPhase('wager')
       setConnectionError(null)
       setReconnecting(false)
+    })
+
+    connection.on('WagerSubmitted', (data) => {
+      console.log('WagerSubmitted event received:', data)
+      // We do not auto-advance here; we wait for "AllWagersIn"
     })
 
     connection.on('Question', (questionData) => {
@@ -84,6 +93,9 @@ const Game = ({ token, setGameId, gameId, onLogout }) => {
       setTimeLeft(150)
       setPhase('question')
       setCurrentQuestionId(questionData.id ?? null)
+      // Reset wager submission for the new question
+      setWagerSubmitted(false)
+      setSelectedWager(null)
     })
 
     connection.on('DisplayAnswer', (questionId, correctAns) => {
@@ -109,41 +121,36 @@ const Game = ({ token, setGameId, gameId, onLogout }) => {
     })
 
     connection.on('AllWagersIn', () => {
-      console.log('AllWagersIn received')
+      console.log('All wagers received, proceeding...')
+      setPhase('waitingForQuestion')
     })
 
-    // Handle permanent disconnect
     connection.onclose((err) => {
       console.error('Connection closed:', err)
       setConnectionError('Connection closed unexpectedly')
-      setHubConnection(null)
+      hubConnectionRef.current = null
       setReconnecting(true)
     })
 
-    // Handle reconnection attempt
     connection.onreconnecting((err) => {
       console.log('Reconnecting:', err)
       setConnectionError('Reconnecting to hub...')
       setReconnecting(true)
     })
 
-    // Handle successful reconnection
     connection.onreconnected(() => {
       console.log('Reconnected')
       setConnectionError(null)
       setReconnecting(false)
       if (!joinedGamesRef.current[gameId]) {
-        console.log('Reconnected, invoking JoinGame:', { gameId, teamId })
-        connection.invoke('JoinGame', gameId, teamId).catch(handleJoinError)
+        connection
+          .invoke('JoinGame', gameId, teamId)
+          .catch((err) => console.error('Failed to invoke JoinGame:', err))
       } else {
-        console.log(
-          `Team ${teamId} already joined game ${gameId}, skipping JoinGame`
-        )
         setPhase('wager')
       }
     })
 
-    // Centralized error handler for JoinGame invocation
     const handleJoinError = (err) => {
       console.error('Failed to invoke JoinGame:', err)
       if (err.message && err.message.includes('has already joined')) {
@@ -160,55 +167,45 @@ const Game = ({ token, setGameId, gameId, onLogout }) => {
       }
     }
 
-    // Start the connection with manual retry for initial failure
     const startConnection = () => {
       console.log('Attempting to start SignalR connection...')
       connection
         .start()
         .then(() => {
           console.log('Connected to SignalR hub')
-          setHubConnection(connection)
+          hubConnectionRef.current = connection
           setConnectionError(null)
           setReconnecting(false)
-          if (!joinedGamesRef.current[gameId]) {
-            console.log('Invoking JoinGame:', { gameId, teamId })
-            connection.invoke('JoinGame', gameId, teamId).catch(handleJoinError)
-          } else {
-            console.log(
-              `Team ${teamId} already joined game ${gameId}, skipping JoinGame`
-            )
-            setPhase('wager')
-          }
+          connection.invoke('JoinGame', gameId, teamId).catch(handleJoinError)
         })
         .catch((err) => {
           console.error('SignalR connection error:', err)
           setConnectionError('Failed to connect to hub: ' + err.message)
           setReconnecting(true)
-          setTimeout(startConnection, 5000) // Retry after 5 seconds
+          setTimeout(startConnection, 5000)
         })
     }
     startConnection()
-
-    // No cleanup in this effect; handled in separate useEffect
   }, [gameId, token, teamId])
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (
-        hubConnection &&
-        hubConnection.state !== signalR.HubConnectionState.Disconnected
+        hubConnectionRef.current &&
+        hubConnectionRef.current.state !==
+          signalR.HubConnectionState.Disconnected
       ) {
-        hubConnection
+        hubConnectionRef.current
           .stop()
           .then(() => console.log('Connection stopped on unmount'))
           .catch((err) => console.error('Error stopping connection:', err))
-        setHubConnection(null)
+        hubConnectionRef.current = null
       }
     }
-  }, [hubConnection])
+  }, [])
 
-  // Timer effect
+  // Timer effect for question phase
   useEffect(() => {
     let timerId
     if (phase === 'question' && timeLeft > 0) {
@@ -226,36 +223,65 @@ const Game = ({ token, setGameId, gameId, onLogout }) => {
     return () => clearInterval(timerId)
   }, [phase, timeLeft])
 
-  // Start/Join a new game
+  // Auto-advance in single-team scenario
+  useEffect(() => {
+    if (phase === 'waitingForQuestion') {
+      const timeout = setTimeout(() => {
+        if (
+          hubConnectionRef.current &&
+          hubConnectionRef.current.state ===
+            signalR.HubConnectionState.Connected
+        ) {
+          console.log('Auto-invoking ReadyForNextQuestion')
+          hubConnectionRef.current
+            .invoke(
+              'ReadyForNextQuestion',
+              gameId,
+              teamId,
+              round,
+              questionNumber
+            )
+            .catch((err) =>
+              console.error('Error invoking ReadyForNextQuestion:', err)
+            )
+        }
+      }, 3000)
+      return () => clearTimeout(timeout)
+    }
+  }, [phase, gameId, teamId, round, questionNumber])
+
+  // Function to join an open game (using the join endpoint)
   const joinGame = async () => {
     try {
       const response = await axios.post(
-        'https://localhost:7169/api/game/start',
+        'https://localhost:7169/api/game/join',
         { teamIds: [teamId] },
         { headers: { Authorization: `Bearer ${token}` } }
       )
       console.log('Join Game Response:', response.data)
       const newGameId = response.data.gameId
       setGameId(newGameId)
+      // Reset states for new game
       setRound(1)
       setQuestionNumber(1)
-      setUsedWagers([])
       setSelectedWager(null)
+      setWagerSubmitted(false)
       setPhase('idle')
       setAnswer('')
       setCorrectAnswer(null)
       setConnectionError(null)
       setReconnecting(false)
-      delete joinedGamesRef.current[gameId] // Clear old game status
+      // Clear previous join status using the new gameId
+      delete joinedGamesRef.current[newGameId]
+      // Stop any active connection
       if (
-        hubConnection &&
-        hubConnection.state !== signalR.HubConnectionState.Disconnected
+        hubConnectionRef.current &&
+        hubConnectionRef.current.state !==
+          signalR.HubConnectionState.Disconnected
       ) {
-        hubConnection
-          .stop()
-          .then(() => console.log('Connection stopped before new game'))
-          .catch((err) => console.error('Error stopping connection:', err))
-        setHubConnection(null)
+        await hubConnectionRef.current.stop()
+        console.log('Connection stopped before new game')
+        hubConnectionRef.current = null
       }
     } catch (error) {
       alert(
@@ -264,22 +290,38 @@ const Game = ({ token, setGameId, gameId, onLogout }) => {
     }
   }
 
+  // Function to start the game (using the start endpoint)
+  const startGame = async () => {
+    try {
+      const response = await axios.post(
+        'https://localhost:7169/api/game/start',
+        { gameId },
+        { headers: { Authorization: `Bearer ${token}` } }
+      )
+      console.log('Start Game Response:', response.data)
+    } catch (error) {
+      alert(
+        `Failed to start game: ${error.response?.data?.error || error.message}`
+      )
+    }
+  }
+
   // Handle wager selection
   const handleWagerSelect = (wagerValue) => {
+    if (wagerSubmitted) return // Prevent duplicate submission.
     setSelectedWager(wagerValue)
-    setUsedWagers((prev) => [...prev, wagerValue])
-    setPhase('waitingForQuestion')
+    setWagerSubmitted(true)
     if (
-      hubConnection &&
-      hubConnection.state === signalR.HubConnectionState.Connected
+      hubConnectionRef.current &&
+      hubConnectionRef.current.state === signalR.HubConnectionState.Connected
     ) {
-      hubConnection
+      hubConnectionRef.current
         .invoke('SubmitWager', gameId, teamId, wagerValue, questionNumber)
         .catch((err) => console.error('Error sending wager:', err))
     }
   }
 
-  // Submit answer
+  // Submit answer via Axios API call (which upserts the answer record)
   const submitAnswer = async () => {
     if (!answer) {
       alert('Please select an answer.')
@@ -313,27 +355,23 @@ const Game = ({ token, setGameId, gameId, onLogout }) => {
   const goToNextQuestion = () => {
     let nextQuestionNum = questionNumber + 1
     let nextRound = round
-    let resetWagers = false
-
     if (questionNumber >= 3) {
       nextRound = round + 1
       nextQuestionNum = 1
-      resetWagers = true
     }
-
     setRound(nextRound)
     setQuestionNumber(nextQuestionNum)
-    if (resetWagers) setUsedWagers([])
     setSelectedWager(null)
     setAnswer('')
     setCorrectAnswer(null)
+    // Reset wager submission flag for new question.
+    setWagerSubmitted(false)
     setPhase('wager')
-
     if (
-      hubConnection &&
-      hubConnection.state === signalR.HubConnectionState.Connected
+      hubConnectionRef.current &&
+      hubConnectionRef.current.state === signalR.HubConnectionState.Connected
     ) {
-      hubConnection
+      hubConnectionRef.current
         .invoke(
           'ReadyForNextQuestion',
           gameId,
@@ -349,91 +387,106 @@ const Game = ({ token, setGameId, gameId, onLogout }) => {
   let content
   if (!gameId) {
     content = <button onClick={joinGame}>Join Game</button>
+  } else if (phase === 'idle') {
+    content = (
+      <div>
+        <p>Game ID: {gameId}</p>
+        <button onClick={startGame}>Start Game</button>
+      </div>
+    )
   } else if (connectionError) {
     content = <p>Error: {connectionError}</p>
   } else {
-    if (phase === 'wager') {
-      content = (
-        <div className='wager-phase'>
-          <h3>
-            Round {round} – Question {questionNumber}: Select your wager
-          </h3>
-          <div>
-            {[1, 3, 5].map((value) => (
-              <button
-                key={value}
-                onClick={() => handleWagerSelect(value)}
-                disabled={usedWagers.includes(value)}
-              >
-                {value} {value === 1 ? 'point' : 'points'}
-              </button>
-            ))}
+    switch (phase) {
+      case 'wager':
+        content = (
+          <div className='wager-phase'>
+            <h3>
+              Round {round} – Question {questionNumber}: Select your wager
+            </h3>
+            <div>
+              {[1, 3, 5].map((value) => (
+                <button
+                  key={value}
+                  onClick={() => handleWagerSelect(value)}
+                  disabled={wagerSubmitted}
+                >
+                  {value} {value === 1 ? 'point' : 'points'}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
-      )
-    } else if (phase === 'waitingForQuestion') {
-      content = (
-        <div className='waiting-screen'>
-          <h3>
-            Round {round} – Question {questionNumber}
-          </h3>
-          <p>Wager placed: {selectedWager} points.</p>
-          <p>Waiting for other teams to wager...</p>
-        </div>
-      )
-    } else if (phase === 'question') {
-      content = (
-        <div className='question-phase'>
-          <h3>
-            Round {round} – Question {questionNumber}
-          </h3>
-          <p>
-            <strong>{questionText}</strong>
-          </p>
-          <div className='options-list'>
-            {answerOptions.map((opt, idx) => (
-              <div key={idx}>
-                <label>
-                  <input
-                    type='radio'
-                    name='answerOption'
-                    value={opt}
-                    checked={answer === opt}
-                    onChange={() => setAnswer(opt)}
-                  />
-                  {opt}
-                </label>
-              </div>
-            ))}
+        )
+        break
+      case 'waitingForQuestion':
+        content = (
+          <div className='waiting-screen'>
+            <h3>
+              Round {round} – Question {questionNumber}
+            </h3>
+            <p>Wager placed: {selectedWager} points.</p>
+            <p>Waiting for other teams to submit wagers...</p>
           </div>
-          <button onClick={submitAnswer} disabled={!answer}>
-            Submit Answer
-          </button>
-          <div className='timer'>Time remaining: {timeLeft} seconds</div>
-        </div>
-      )
-    } else if (phase === 'waitingForResults') {
-      content = (
-        <div className='waiting-screen'>
-          <h3>
-            Round {round} – Question {questionNumber}
-          </h3>
-          <p>Your answer has been submitted!</p>
-          <p>Waiting for other teams to submit answers...</p>
-        </div>
-      )
-    } else if (phase === 'reveal') {
-      content = (
-        <div className='reveal-phase'>
-          <h3>
-            Round {round} – Question {questionNumber} Results
-          </h3>
-          {correctAnswer && <p>{correctAnswer}</p>}
-          <button onClick={goToNextQuestion}>
-            {questionNumber < 3 ? 'Next Question' : 'Next Round'}
-          </button>
-        </div>
-      )
+        )
+        break
+      case 'question':
+        content = (
+          <div className='question-phase'>
+            <h3>
+              Round {round} – Question {questionNumber}
+            </h3>
+            <p>
+              <strong>{questionText}</strong>
+            </p>
+            <div className='options-list'>
+              {answerOptions.map((opt, idx) => (
+                <div key={idx}>
+                  <label>
+                    <input
+                      type='radio'
+                      name='answerOption'
+                      value={opt}
+                      checked={answer === opt}
+                      onChange={() => setAnswer(opt)}
+                    />
+                    {opt}
+                  </label>
+                </div>
+              ))}
+            </div>
+            <button onClick={submitAnswer} disabled={!answer}>
+              Submit Answer
+            </button>
+            <div className='timer'>Time remaining: {timeLeft} seconds</div>
+          </div>
+        )
+        break
+      case 'waitingForResults':
+        content = (
+          <div className='waiting-screen'>
+            <h3>
+              Round {round} – Question {questionNumber}
+            </h3>
+            <p>Your answer has been submitted!</p>
+            <p>Waiting for other teams to submit answers...</p>
+          </div>
+        )
+        break
+      case 'reveal':
+        content = (
+          <div className='reveal-phase'>
+            <h3>
+              Round {round} – Question {questionNumber} Results
+            </h3>
+            {correctAnswer && <p>{correctAnswer}</p>}
+            <button onClick={goToNextQuestion}>
+              {questionNumber < 3 ? 'Next Question' : 'Next Round'}
+            </button>
+          </div>
+        )
+        break
+      default:
+        content = <p>Loading...</p>
     }
   }
 
