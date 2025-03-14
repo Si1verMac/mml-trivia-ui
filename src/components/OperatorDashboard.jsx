@@ -7,20 +7,54 @@ import { jwtDecode } from 'jwt-decode'
 const OperatorDashboard = ({
   token,
   gameId: initialGameId,
-  setGameId,
   onLogout,
   connection,
+  gameState,
+  updateGameState,
 }) => {
   const [scores, setScores] = useState([])
   const [connectionStatus, setConnectionStatus] = useState('Disconnected')
-  const [localGameId, setLocalGameId] = useState(initialGameId)
+  const [games, setGames] = useState([])
+  const [localGameId, setLocalGameId] = useState(() => {
+    const storedGameId = localStorage.getItem('operatorSelectedGameId')
+    return storedGameId ? parseInt(storedGameId, 10) : initialGameId
+  })
   const [correctAnswer, setCorrectAnswer] = useState(null)
   const [gamePhase, setGamePhase] = useState('unknown')
-  const hubConnectionRef = useRef(null)
+  const [questionText, setQuestionText] = useState('')
   const decoded = jwtDecode(token)
   const teamId = parseInt(decoded.teamId, 10)
+  const previousGameIdRef = useRef(null)
+
+  // Fetch all games and set the most recent as default
+  useEffect(() => {
+    const fetchGames = async () => {
+      try {
+        const response = await axios.get(
+          'https://localhost:7169/api/game/all',
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        )
+        const gameList = response.data
+        setGames(gameList)
+        if (!localGameId && gameList.length > 0) {
+          const defaultGame = gameList[0] // Most recent game
+          setLocalGameId(defaultGame.id)
+          localStorage.setItem('operatorSelectedGameId', defaultGame.id)
+          fetchScores(defaultGame.id)
+        } else if (localGameId) {
+          fetchScores(localGameId)
+        }
+      } catch (err) {
+        console.error('Error fetching games:', err)
+      }
+    }
+    fetchGames()
+  }, [token, localGameId]) // Include localGameId in dependencies
 
   const fetchScores = async (id) => {
+    if (!id) return
     try {
       const response = await axios.get(
         `https://localhost:7169/api/game/${id}/scores`,
@@ -28,62 +62,78 @@ const OperatorDashboard = ({
           headers: { Authorization: `Bearer ${token}` },
         }
       )
-      console.log('Fetched scores:', response.data)
       setScores(response.data)
     } catch (err) {
       console.error('Error fetching scores:', err)
     }
   }
 
-  connection.on('scoresupdated', (scoresupdated) => {
-    console.log('Received scores:', scoresupdated)
-    setScores(scoresupdated)
-  })
-
+  // Handle SignalR connection setup and events
   useEffect(() => {
     if (!connection) return
 
-    hubConnectionRef.current = connection
-
-    // Handler for 'joinedoperatorgroup'
-    connection.on('JoinedOperatorGroup', (message) => {
-      console.log('Joined operator group:', message)
+    connection.on('JoinedOperatorGroup', () => {
       setConnectionStatus('Connected')
     })
 
-    // Listen for score updates
-    connection.on('ScoresUpdated', (scoresupdated) => {
-      setScores(scoresupdated)
-      console.log('Scores updated:', scoresupdated)
+    connection.on('ScoresUpdated', (gameId, updatedScores) => {
+      if (gameId === localGameId) {
+        setScores(updatedScores)
+      }
     })
 
-    // Also listen for DisplayAnswer events
-    connection.on('DisplayAnswer', (qId, correctAns) => {
-      console.log('DisplayAnswer event received in operator dashboard:', {
-        qId,
-        correctAns,
-      })
-      setCorrectAnswer(`Correct answer: ${correctAns}`)
-      setGamePhase('reveal')
-    })
-
-    // Listen for Question events to update phase
     connection.on('Question', (qData) => {
-      console.log('Question event received in operator dashboard:', qData)
       setGamePhase('question')
       setCorrectAnswer(null)
+      setQuestionText(qData.text)
+      updateGameState({
+        currentQuestionId: qData.id,
+        question: qData,
+        correctAnswer: null,
+        currentPhase: 'question',
+      })
+    })
+
+    connection.on('DisplayAnswer', (qId, correctAns) => {
+      setCorrectAnswer(`Correct answer: ${correctAns}`)
+      setGamePhase('reveal')
+      updateGameState({
+        currentQuestionId: qId,
+        correctAnswer: `Correct answer: ${correctAns}`,
+        currentPhase: 'reveal',
+      })
+    })
+
+    // Add no-op handlers for events from Game.jsx or App.jsx
+    connection.on('TeamJoined', () => {
+      // Do nothing - this is for Game.jsx
+    })
+
+    connection.on('GameState', () => {
+      // Do nothing - this is for Game.jsx
+    })
+
+    connection.on('AnswerSubmitted', () => {
+      // Do nothing - this is for Game.jsx
+    })
+
+    connection.on('TeamSignaledReady', () => {
+      // Do nothing - this is for Game.jsx
+    })
+    connection.on('GameStarted', () => {
+      updateGameState({ currentPhase: 'question' })
+    })
+
+    connection.on('GameEnded', () => {
+      updateGameState({ currentPhase: 'ended' })
     })
 
     const setupConnection = async () => {
       if (connection.state === signalR.HubConnectionState.Disconnected) {
         await connection.start()
       }
-
       await connection.invoke('JoinOperatorGroup')
-
-      // Also join the game group if a game is selected
       if (localGameId) {
-        console.log('Operator joining game:', localGameId)
         await connection.invoke('JoinGame', localGameId, teamId)
         fetchScores(localGameId)
       }
@@ -91,45 +141,58 @@ const OperatorDashboard = ({
 
     setupConnection().catch(console.error)
 
-    connection.onclose((err) => {
-      console.log('Connection closed', err)
-      setConnectionStatus('Disconnected')
-    })
-
-    connection.onreconnecting(() => {
-      console.log('Reconnecting…')
-      setConnectionStatus('Reconnecting…')
-    })
-
+    connection.onclose(() => setConnectionStatus('Disconnected'))
+    connection.onreconnecting(() => setConnectionStatus('Reconnecting…'))
     connection.onreconnected(() => {
-      console.log('Reconnected')
       setConnectionStatus('Connected')
       setupConnection().catch(console.error)
     })
 
     return () => {
-      // Connection cleanup is managed by App.jsx, so no stop here
+      // Cleanup handled by App.jsx
     }
-  }, [token, localGameId, connection, teamId])
+  }, [connection, localGameId, teamId, token, updateGameState])
 
-  // Effect to handle initialGameId updates from parent
+  // Handle game group changes
   useEffect(() => {
-    setLocalGameId(initialGameId)
-    if (
-      initialGameId &&
-      connection?.state === signalR.HubConnectionState.Connected
-    ) {
-      fetchScores(initialGameId)
-      // Join the game group when gameId changes
-      connection.invoke('JoinGame', initialGameId, teamId).catch(console.error)
-    }
-  }, [initialGameId, connection, teamId])
+    if (!connection || connection.state !== 'Connected') return
 
-  const handleGameIdChange = (e) => {
-    const newGameId = parseInt(e.target.value) || null
+    const joinGame = async (gameId) => {
+      await connection.invoke('JoinGame', gameId, teamId)
+    }
+
+    const leaveGame = async (gameId) => {
+      await connection.invoke('LeaveGame', gameId, teamId)
+    }
+
+    if (
+      previousGameIdRef.current &&
+      previousGameIdRef.current !== localGameId
+    ) {
+      leaveGame(previousGameIdRef.current)
+    }
+    if (localGameId) {
+      joinGame(localGameId)
+      fetchScores(localGameId) // Initial fetch, then rely on SignalR
+    }
+    previousGameIdRef.current = localGameId
+
+    return () => {
+      if (localGameId && connection.state === 'Connected') {
+        leaveGame(localGameId).catch(console.error)
+      }
+    }
+  }, [localGameId, connection, teamId])
+
+  const handleGameChange = (e) => {
+    const newGameId = parseInt(e.target.value, 10) || null
     setLocalGameId(newGameId)
-    setGameId(newGameId)
-    if (newGameId) fetchScores(newGameId)
+    if (newGameId) {
+      localStorage.setItem('operatorSelectedGameId', newGameId)
+      fetchScores(newGameId)
+    } else {
+      localStorage.removeItem('operatorSelectedGameId')
+    }
   }
 
   return (
@@ -141,24 +204,33 @@ const OperatorDashboard = ({
       <p>Connection Status: {connectionStatus}</p>
       <div>
         <label>
-          Game ID:
-          <input
-            type='number'
-            value={localGameId || ''}
-            onChange={handleGameIdChange}
-            placeholder='Enter Game ID'
-          />
+          Select Game:
+          <select value={localGameId || ''} onChange={handleGameChange}>
+            <option value='' disabled>
+              Select a game
+            </option>
+            {games.map((game) => (
+              <option key={game.id} value={game.id}>
+                Game {game.id} - {game.name} ({game.status})
+              </option>
+            ))}
+          </select>
         </label>
       </div>
-
-      {correctAnswer && (
+      <p>Current Phase: {gamePhase}</p>
+      {gamePhase === 'question' && questionText && (
+        <div>
+          <h3>Current Question</h3>
+          <p>{questionText}</p>
+        </div>
+      )}
+      {gamePhase === 'reveal' && correctAnswer && (
         <div>
           <h3>Current Answer</h3>
           <p>{correctAnswer}</p>
         </div>
       )}
-
-      <h3>Team Scores</h3>
+      <h3>Team Scores for Game {localGameId}</h3>
       {scores.length === 0 ? (
         <p>No scores available</p>
       ) : (
@@ -187,9 +259,10 @@ const OperatorDashboard = ({
 OperatorDashboard.propTypes = {
   token: PropTypes.string.isRequired,
   gameId: PropTypes.number,
-  setGameId: PropTypes.func.isRequired,
   onLogout: PropTypes.func.isRequired,
   connection: PropTypes.object,
+  gameState: PropTypes.object.isRequired,
+  updateGameState: PropTypes.func.isRequired,
 }
 
 export default OperatorDashboard

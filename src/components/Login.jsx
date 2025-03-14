@@ -23,7 +23,7 @@ const Login = ({ onLogin }) => {
   }
 
   return (
-    <div>
+    <div className='login-container'>
       <h2>Team Login</h2>
       <form onSubmit={handleSubmit}>
         <input

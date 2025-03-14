@@ -1,17 +1,87 @@
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: American Typewriter, system-ui, Avenir, Helvetica, Arial,
+    sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
   color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  color: rgba(5, 5, 5, 0.87);
+  background-color: #fffdfd;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
+/* Header styles */
+.app-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  padding: 5px 0;
+  text-align: center;
+  color: #000000;
+  background-color: #ffffff;
+}
+
+.app-header h1 {
+  margin: 0;
+  padding: 0;
+  font-size: 3.5rem;
+}
+
+.headerImg {
+  height: 54.1px;
+  width: 100px;
+  margin-left: auto;
+  margin-right: auto;
+
+  filter: drop-shadow(3px 3px 9px #09022d);
+}
+
+/* Header divider line for visual separation */
+.header-divider {
+  height: 3px;
+  background: linear-gradient(
+    90deg,
+    rgba(100, 108, 255, 0.4) 0%,
+    rgba(100, 108, 255, 0.8) 50%,
+    rgba(100, 108, 255, 0.4) 100%
+  );
+  width: 100%;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+}
+
+/* Main container specific styling */
+.main-container {
+  padding-top: 100px; /* Even less space at the top */
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Content container with padding for header - for other containers */
+#root > div:not(.main-container) {
+  width: 100%;
+  max-width: 800px;
+  padding-top: 70px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Add space to all direct children of the main container for better spacing */
+/*#root > div > * {
+  margin-top: 15px; Slightly reduced margin 
+}*/
 
 a {
   font-weight: 500;
@@ -22,12 +92,16 @@ a:hover {
   color: #535bf2;
 }
 
+/* Add padding to the body to account for the fixed header */
 body {
+  padding-top: 0; /* Remove this padding as we're handling it in #root > div */
   margin: 0;
   display: flex;
-  place-items: center;
+  /*place-items: center;*/
   min-width: 320px;
   min-height: 100vh;
+  justify-content: center;
+  z-index: -1000;
 }
 
 h1 {
@@ -35,7 +109,70 @@ h1 {
   line-height: 1.1;
 }
 
+.overlay_message {
+  font-size: 5rem;
+  color: #000000;
+  text-shadow: 0 0 2em rgb(250, 248, 250), 0 0 1em rgb(253, 251, 253);
+  animation: grow 2s ease-out forwards;
+}
+
+@keyframes grow {
+  from {
+    font-size: 1rem;
+  }
+  to {
+    font-size: 4.2rem;
+  }
+}
+
+@keyframes ColorChange {
+  0% {
+    color: rgb(191, 41, 255);
+  }
+  /* 7% {
+    color: rgb(134, 11, 11);
+  }
+
+  15% {
+    color: rgb(149, 7, 57);
+  }
+  25% {
+    color: rgb(85, 3, 106); 
+  }
+  /* 33% {
+    color: rgb(63, 7, 96);
+  } */
+  /* 40% {
+    color: rgb(162, 0, 255);
+  } */
+  45% {
+    color: rgb(69, 4, 80);
+  }
+  /* 50% {
+    color: midnightblue;
+  } */
+  /* 62% {
+    color: rgb(76, 13, 149);
+  }
+  75% {
+    color: rgb(97, 25, 112);
+  }
+  80% {
+    color: rgb(145, 10, 136);
+  }
+  85% {
+    color: rgb(195, 14, 96);
+  }
+  92% {
+    color: rgb(216, 42, 121);
+  } */
+  100% {
+    color: rgb(245, 12, 203);
+  }
+}
+
 button {
+  margin: 10px 5px;
   border-radius: 8px;
   border: 1px solid transparent;
   padding: 0.6em 1.2em;
@@ -46,12 +183,75 @@ button {
   cursor: pointer;
   transition: border-color 0.25s;
 }
+
 button:hover {
   border-color: #646cff;
+  background-color: rgb(82, 122, 223);
 }
 button:focus,
 button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
+}
+
+.operator-button {
+  position: fixed;
+  top: 10px;
+  left: 20px;
+  z-index: 100;
+  color: #1a1a1a;
+  background-color: #ffffff;
+  border-color: rgb(0, 0, 0);
+  border-width: 0.2em;
+}
+
+.operator-button:hover {
+  border-color: #646cff;
+  background-color: aqua;
+}
+.operator-button:focus,
+:focus-visible {
+  outline: 4px auto -webkit-focus-ring-color;
+}
+
+.logout_button {
+  position: fixed;
+  top: 15px;
+  right: 20px;
+  z-index: 100;
+  background-color: #ffffff;
+  border-color: rgb(0, 0, 0);
+  border-width: 0.2em;
+  color: #1a1a1a;
+}
+
+.next_question_button {
+  margin: 100px;
+  background-color: #ffffff;
+  border-color: rgb(0, 0, 0);
+  border-width: 0.2em;
+  color: #1a1a1a;
+}
+
+/* Component containers for better separation */
+.operator-dashboard,
+.game-container,
+.login-container,
+.register-container {
+  background-color: rgb(184, 187, 201);
+  border-radius: 8px;
+  padding: 20px;
+  margin-top: 50px; /* Even less top margin */
+  width: 90%;
+  max-width: 700px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+}
+
+/* First child of containers should have no top margin */
+.operator-dashboard > :first-child,
+.game-container > :first-child,
+.login-container > :first-child,
+.register-container > :first-child {
+  margin-top: 0;
 }
 
 @media (prefers-color-scheme: light) {
@@ -64,5 +264,10 @@ button:focus-visible {
   }
   button {
     background-color: #f9f9f9;
+  }
+  @media (prefers-color-scheme: dark) {
+    .app-header {
+      color: #ffffff;
+    }
   }
 }

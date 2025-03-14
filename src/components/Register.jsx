@@ -24,8 +24,8 @@ const Register = ({ onRegisterSuccess }) => {
   }
 
   return (
-    <div>
-      <h2>Register Team</h2>
+    <div className='register-container'>
+      <h2>Team Registration</h2>
       <form onSubmit={handleSubmit}>
         <input
           type='text'

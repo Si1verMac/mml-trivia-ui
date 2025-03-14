@@ -3,20 +3,35 @@ import axios from 'axios'
 import { jwtDecode } from 'jwt-decode'
 import * as signalR from '@microsoft/signalr'
 import PropTypes from 'prop-types'
+import Confetti from 'react-confetti'
 
-const Game = ({ token, gameId, setGameId, onLogout, connection }) => {
+const Game = ({
+  token,
+  gameId,
+  setGameId,
+  onLogout,
+  connection,
+  isReconnecting,
+  gameState,
+  updateGameState,
+}) => {
   const decoded = jwtDecode(token)
   const teamId = parseInt(decoded.teamId, 10)
 
-  const [phase, setPhase] = useState('idle')
-  const [round, setRound] = useState(1)
-  const [questionNumber, setQuestionNumber] = useState(1)
-  const [questionText, setQuestionText] = useState('')
-  const [answerOptions, setAnswerOptions] = useState([])
-  const [currentQuestionId, setCurrentQuestionId] = useState(null)
+  // UI state
+  const [phase, setPhase] = useState(gameState.currentPhase || 'idle')
+  const [round, setRound] = useState(gameState.question?.round || 1)
+  const [questionNumber, setQuestionNumber] = useState(
+    gameState.question?.questionNumber || 1
+  )
+  const [questionText, setQuestionText] = useState(
+    gameState.question?.text || ''
+  )
+  const [answerOptions, setAnswerOptions] = useState(
+    gameState.question?.options || []
+  )
   const [selectedWager, setSelectedWager] = useState(null)
   const [answer, setAnswer] = useState('')
-  const [correctAnswer, setCorrectAnswer] = useState(null)
   const [timeLeft, setTimeLeft] = useState(0)
   const [connectionError, setConnectionError] = useState(null)
   const [reconnecting, setReconnecting] = useState(false)
@@ -25,27 +40,219 @@ const Game = ({ token, gameId, setGameId, onLogout, connection }) => {
   const [selectedGameId, setSelectedGameId] = useState('')
   const [hasSignaledReady, setHasSignaledReady] = useState(false)
   const [hasReceivedAnswer, setHasReceivedAnswer] = useState(false)
+  const [answeredQuestions, setAnsweredQuestions] = useState(new Set())
+  const [showOverlay, setShowOverlay] = useState(false)
+  const [overlayMessage, setOverlayMessage] = useState('')
+  const [isCorrect, setIsCorrect] = useState(false)
+  const [correctAnswer, setCorrectAnswer] = useState('')
+  const [teamAnswerCorrect, setTeamAnswerCorrect] = useState(null)
 
-  // Track whether the component is mounted
-  const isMounted = useRef(true)
-  // Track the last processed question ID to avoid duplicates
-  const lastProcessedQuestionId = useRef(null)
-
-  // Clean up function to run when unmounting
-  useEffect(() => {
-    return () => {
-      isMounted.current = false
-    }
-  }, [])
-
-  // Helper function to reset the ready state
-  const resetReadyState = () => {
-    console.log('Explicitly resetting ready state')
-    setHasSignaledReady(false)
-  }
-
-  const hubConnectionRef = useRef(null)
   const timeoutRef = useRef(null)
+  const eventsRegistered = useRef(false)
+
+  // Sync App gameState with local UI state
+  useEffect(() => {
+    if (gameState.currentPhase !== phase) {
+      console.log(
+        `Updating local phase to ${gameState.currentPhase} from ${phase} (App gameState changed)`
+      )
+      setPhase(gameState.currentPhase)
+    }
+
+    if (gameState.question && gameState.question.text !== questionText) {
+      console.log('Updating local question from App gameState')
+      if (gameState.question.round) setRound(gameState.question.round)
+      if (gameState.question.questionNumber)
+        setQuestionNumber(gameState.question.questionNumber)
+      if (gameState.question.text) setQuestionText(gameState.question.text)
+      if (gameState.question.options)
+        setAnswerOptions(gameState.question.options)
+    }
+
+    if (gameState.correctAnswer && gameState.correctAnswer !== '') {
+      console.log(gameState.correctAnswer + 'Line 73')
+      setHasReceivedAnswer(true)
+    }
+  }, [gameState, phase, questionText])
+
+  // Set up SignalR events with stable dependencies
+  useEffect(() => {
+    if (!connection || !gameId || eventsRegistered.current) return
+
+    console.log('Registering Game component event handlers')
+
+    connection.on('GameStarted', (data) => {
+      console.log('GameStarted event received:', data)
+      changePhase('question')
+    })
+
+    connection.on('TeamJoined', ({ teamId: joinedId }) => {
+      console.log(`Team ${joinedId} joined the game`)
+      setJoinedTeams((prev) =>
+        prev.includes(joinedId) ? prev : [...prev, joinedId]
+      )
+    })
+
+    connection.on('GameState', (state) => {
+      console.log('GameState received:', state)
+      if (
+        state.status === 'InProgress' &&
+        (phase === 'idle' || phase === 'waiting')
+      ) {
+        changePhase('question')
+      } else if (
+        state.status === 'Created' &&
+        phase !== 'question' &&
+        phase !== 'reveal' &&
+        phase !== 'waitingForAnswers'
+      ) {
+        changePhase('waiting')
+      } else if (state.status === 'Ended') {
+        changePhase('ended')
+      }
+    })
+
+    connection.on('GameEnded', () => {
+      console.log('GameEnded event')
+      changePhase('ended')
+      setTimeLeft(0)
+    })
+
+    connection.on('DisplayAnswer', (questionId, correctAnswer) => {
+      console.log('DisplayAnswer event received:', questionId + correctAnswer)
+      //const { questionId, correctAnswer } = data
+
+      setCorrectAnswer(correctAnswer || '')
+
+      console.log(correctAnswer + ' Line 128')
+
+      // Ensure overlay uses current teamAnswerCorrect and selectedWager
+      if (teamAnswerCorrect !== null) {
+        setIsCorrect(teamAnswerCorrect)
+        setOverlayMessage(
+          teamAnswerCorrect
+            ? `Congratulations! You won ${selectedWager || 0} points!`
+            : `Ope! You lost ${selectedWager || 0}.`
+        )
+        setShowOverlay(true)
+        setTimeout(() => {
+          setShowOverlay(false)
+          setTeamAnswerCorrect(null) // Clear after overlay hides
+        }, 5000)
+      }
+
+      setAnsweredQuestions((prev) => {
+        const updated = new Set(prev)
+        updated.add(questionId)
+        return updated
+      })
+      console.log('line149' + correctAnswer)
+      updateGameState({
+        currentQuestionId: questionId,
+        correctAnswer: `${correctAnswer || ''}`,
+        currentPhase: 'reveal',
+      })
+      console.log('Line155' + correctAnswer)
+      setHasReceivedAnswer(true)
+      setHasSignaledReady(false)
+      setTimeLeft(0)
+
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current)
+        timeoutRef.current = null
+      }
+    })
+
+    connection.on('Question', (qData) => {
+      console.log('Question event received:', qData)
+      if (!qData || !qData.id) {
+        console.error('Received invalid question data')
+        return
+      }
+      const questionId = qData.id
+      if (answeredQuestions.has(questionId)) {
+        console.log(`Already answered question ${questionId}`)
+        return
+      }
+      updateGameState({
+        currentQuestionId: questionId,
+        question: qData,
+        correctAnswer: null,
+        currentPhase: 'question',
+      })
+      setRound(qData.round || 1)
+      setQuestionNumber(qData.questionNumber || 1)
+      setQuestionText(qData.text || '')
+      setSelectedWager(null) // Reset wager for new question
+      setAnswer('')
+      setHasReceivedAnswer(false)
+      setHasSignaledReady(false)
+      setShowOverlay(false) // Ensure overlay is off
+      if (Array.isArray(qData.options)) {
+        setAnswerOptions(qData.options)
+      } else if (typeof qData.options === 'string') {
+        try {
+          setAnswerOptions(JSON.parse(qData.options))
+        } catch (e) {
+          console.error('Error parsing options:', e)
+          setAnswerOptions([])
+        }
+      }
+      setTimeLeft(150)
+    })
+
+    connection.on(
+      'AnswerSubmitted',
+      ({ teamId: submittedTeamId, isCorrect }) => {
+        console.log(
+          `Team ${submittedTeamId} answer submitted. Correct: ${isCorrect}`
+        )
+        if (submittedTeamId === teamId) {
+          console.log('Our team submitted an answer')
+          setTeamAnswerCorrect(isCorrect) // Set current correctness
+          if (gameState.currentQuestionId) {
+            setAnsweredQuestions((prev) => {
+              const updated = new Set(prev)
+              updated.add(gameState.currentQuestionId)
+              return updated
+            })
+          }
+          changePhase('waitingForAnswers')
+        }
+      }
+    )
+
+    connection.on('TeamSignaledReady', (readyTeamId) => {
+      if (parseInt(readyTeamId, 10) === teamId && phase === 'reveal') {
+        console.log(`Our team signaled ready`)
+        setHasSignaledReady(true)
+      }
+    })
+
+    eventsRegistered.current = true
+
+    return () => {
+      if (connection) {
+        connection.off('GameStarted')
+        connection.off('TeamJoined')
+        connection.off('GameState')
+        connection.off('GameEnded')
+        connection.off('DisplayAnswer')
+        connection.off('Question')
+        connection.off('AnswerSubmitted')
+        connection.off('TeamSignaledReady')
+        eventsRegistered.current = false
+        console.log('Unregistered Game component event handlers')
+      }
+    }
+  }, [connection, gameId, selectedWager, gameState.currentQuestionId, phase])
+
+  // Helper to change phase both locally and in App
+  const changePhase = (newPhase) => {
+    console.log(`Changing phase from ${phase} to ${newPhase}`)
+    setPhase(newPhase)
+    updateGameState({ currentPhase: newPhase })
+  }
 
   // Fetch active games
   useEffect(() => {
@@ -57,205 +264,37 @@ const Game = ({ token, gameId, setGameId, onLogout, connection }) => {
       .catch((err) => console.error('Error fetching active games:', err))
   }, [token])
 
-  // Set up SignalR connection and event handlers
+  // Join the game when connection is established
   useEffect(() => {
     if (!gameId || !connection) return
 
-    hubConnectionRef.current = connection
-
-    const setupConnection = async () => {
+    const joinGameAsync = async () => {
       if (connection.state === signalR.HubConnectionState.Disconnected) {
-        await connection.start()
+        console.log('Connection is disconnected, waiting for reconnect')
+        return
       }
-      await connection.invoke('JoinGame', gameId, teamId)
+
+      try {
+        console.log(`Joining game ${gameId} as team ${teamId}`)
+        await connection.invoke('JoinGame', gameId, teamId)
+      } catch (err) {
+        console.error('Error joining game:', err)
+      }
     }
 
-    connection.on('GameStarted', (data) => {
-      console.log('GameStarted event received:', data)
-      setPhase('question')
-    })
+    joinGameAsync()
+  }, [gameId, connection, teamId])
 
-    connection.on('TeamJoined', ({ teamId: joinedId }) => {
-      console.log(`Team ${joinedId} joined the game`)
-      setJoinedTeams((prev) =>
-        prev.includes(joinedId) ? prev : [...prev, joinedId]
-      )
-      // Don't change phase here as it may override the current state
-      // The GameState event will set the correct phase
-    })
-
-    connection.on('Question', (qData) => {
-      console.log('Question event received:', qData)
-      if (!qData) {
-        console.error('Question data is empty or undefined')
-        return
-      }
-
-      // Reset the last processed question ID when we get a new question
-      lastProcessedQuestionId.current = null
-
-      setRound(qData.round || 1)
-      setQuestionNumber(qData.questionNumber || 1)
-      setQuestionText(qData.text || '')
-
-      // Handle options correctly whether they're an array or a string
-      if (Array.isArray(qData.options)) {
-        setAnswerOptions(qData.options)
-      } else if (typeof qData.options === 'string') {
-        try {
-          setAnswerOptions(JSON.parse(qData.options))
-        } catch (e) {
-          console.error('Error parsing options:', e)
-          setAnswerOptions([])
-        }
-      } else {
-        setAnswerOptions([])
-      }
-
-      setCurrentQuestionId(qData.id || null)
-      setSelectedWager(null)
-      setAnswer('')
-      setCorrectAnswer(null)
-      setPhase('question')
-      setTimeLeft(150) // 2.5 minutes
-
-      // IMPORTANT: Reset the hasSignaledReady state when a new question arrives
-      console.log('Resetting hasSignaledReady to false for new question')
-      resetReadyState()
-      setHasReceivedAnswer(false)
-    })
-
-    // Move the DisplayAnswer event handling to the top level to ensure highest priority
-    connection.on('DisplayAnswer', (qId, correctAns) => {
-      console.log('DisplayAnswer event received:', {
-        qId,
-        correctAns,
-        currentPhase: phase,
-        lastProcessedId: lastProcessedQuestionId.current,
-      })
-
-      // Avoid processing the same question twice
-      if (lastProcessedQuestionId.current === qId) {
-        console.log(
-          `Ignoring duplicate DisplayAnswer event for question ${qId}`
-        )
-        return
-      }
-
-      lastProcessedQuestionId.current = qId
-
-      // No matter what phase we're in, ensure we show the answer
-      setCorrectAnswer(`Correct answer: ${correctAns}`)
-      setHasReceivedAnswer(true)
-
-      // ALWAYS reset the hasSignaledReady state when showing a new answer
-      resetReadyState()
-
-      // Set phase to reveal, overriding any other phase
-      console.log(`Setting phase to reveal from ${phase}`)
-      setPhase('reveal')
-      setTimeLeft(0)
-
-      // Clear any waiting timeouts to ensure we don't have conflicts
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current)
-        timeoutRef.current = null
-      }
-    })
-
-    connection.on('AnswerSubmitted', ({ teamId, isCorrect }) => {
-      console.log(`Team ${teamId} answer submitted. Correct: ${isCorrect}`)
-      if (teamId === parseInt(decoded.teamId, 10)) {
-        // Clear any existing timeout
-        if (timeoutRef.current) {
-          clearTimeout(timeoutRef.current)
-        }
-
-        // Set phase to waitingForAnswers
-        setPhase('waitingForAnswers')
-
-        // Add a small delay to ensure DisplayAnswer event can be processed
-        // even if it comes immediately after this
-        timeoutRef.current = setTimeout(() => {
-          // If we're still in waitingForAnswers phase after 100ms,
-          // keep it that way - no DisplayAnswer has arrived yet
-          console.log('Checking if DisplayAnswer event was received...')
-        }, 100)
-      }
-    })
-
-    connection.on('ScoresUpdated', (scoresupdated) => {
-      console.log('Received scores:', scoresupdated)
-    })
-
-    connection.on('GameState', (state) => {
-      console.log('GameState received:', state)
-      // Update phase based on game status
-      if (state.status === 'InProgress') {
-        setPhase('question')
-      } else if (state.status === 'Created') {
-        setPhase('waiting')
-      } else if (state.status === 'Ended') {
-        setPhase('ended')
-      }
-    })
-
-    connection.on('GameEnded', () => {
-      console.log('GameEnded event')
-      setPhase('ended')
-      setTimeLeft(0)
-    })
-
-    connection.onclose(() => {
-      console.error('Connection closed')
-      setConnectionError('Connection closed')
+  // Handle reconnection status
+  useEffect(() => {
+    if (isReconnecting) {
+      setConnectionError('Reconnecting...')
       setReconnecting(true)
-    })
-
-    connection.onreconnecting(() => {
-      console.log('Reconnecting…')
-      setReconnecting(true)
-    })
-
-    connection.onreconnected(() => {
-      console.log('Reconnected')
-      setReconnecting(false)
+    } else if (connection?.state === signalR.HubConnectionState.Connected) {
       setConnectionError(null)
-      connection.invoke('JoinGame', gameId, teamId).catch(console.error)
-      axios
-        .get(`https://localhost:7169/api/game/${gameId}/state`, {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-        .then((response) => {
-          const { currentRound, currentQuestionNumber } = response.data
-          setRound(currentRound)
-          setQuestionNumber(currentQuestionNumber)
-          if (connection.state === signalR.HubConnectionState.Connected) {
-            axios
-              .get(`https://localhost:7169/api/game/${gameId}/state`, {
-                headers: { Authorization: `Bearer ${token}` },
-              })
-              .then((resp) => {
-                const game = resp.data
-                if (game.currentQuestionId) {
-                  connection.invoke('JoinGame', gameId, teamId)
-                }
-              })
-          }
-        })
-        .catch((err) => console.error('Error fetching game state:', err))
-    })
-
-    setupConnection().catch((err) => {
-      console.error('SignalR setup error:', err)
-      setConnectionError(err.message)
-      setReconnecting(true)
-    })
-
-    return () => {
-      // Connection cleanup managed by App.jsx
+      setReconnecting(false)
     }
-  }, [gameId, token, teamId, connection])
+  }, [isReconnecting, connection])
 
   // Timer logic
   useEffect(() => {
@@ -265,13 +304,14 @@ const Game = ({ token, gameId, setGameId, onLogout, connection }) => {
         setTimeLeft((prev) => {
           if (prev <= 1) {
             clearInterval(timer)
-            setPhase('waitingForResults')
-            if (
-              connection &&
-              connection.state === signalR.HubConnectionState.Connected
-            ) {
+            changePhase('waitingForResults')
+            if (connection?.state === signalR.HubConnectionState.Connected) {
               connection
-                .invoke('HandleTimerExpiry', gameId, currentQuestionId)
+                .invoke(
+                  'HandleTimerExpiry',
+                  gameId,
+                  gameState.currentQuestionId
+                )
                 .catch((err) =>
                   console.error('Error invoking HandleTimerExpiry:', err)
                 )
@@ -283,41 +323,39 @@ const Game = ({ token, gameId, setGameId, onLogout, connection }) => {
       }, 1000)
     }
     return () => clearInterval(timer)
-  }, [phase, timeLeft, connection, gameId, currentQuestionId])
+  }, [phase, timeLeft, connection, gameId, gameState.currentQuestionId])
 
-  // Monitor for stuck in waitingForAnswers state
+  // Check if we're stuck in waiting phase
   useEffect(() => {
-    if (phase === 'waitingForAnswers') {
-      // After 2 seconds in waitingForAnswers, assume we might have missed an event
-      const timer = setTimeout(() => {
-        console.log(
-          'Still in waitingForAnswers phase after 2 seconds, requesting current game state'
-        )
-        if (
-          connection &&
-          connection.state === signalR.HubConnectionState.Connected
-        ) {
-          // Request the current game state to ensure we're in sync
-          connection
-            .invoke('RequestGameState', gameId, teamId)
-            .catch((err) => console.error('Error requesting game state:', err))
+    if (phase === 'waitingForAnswers' && !hasReceivedAnswer) {
+      console.log('Setting up stuck check for waitingForAnswers phase')
+
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current)
+      }
+
+      timeoutRef.current = setTimeout(() => {
+        if (phase === 'waitingForAnswers' && !hasReceivedAnswer) {
+          console.log(
+            'Still waiting for answers after timeout, requesting game state'
+          )
+          if (connection?.state === signalR.HubConnectionState.Connected) {
+            connection
+              .invoke('RequestGameState', gameId, teamId)
+              .catch((err) =>
+                console.error('Error requesting game state:', err)
+              )
+          }
         }
-      }, 2000)
+      }, 5000)
 
-      return () => clearTimeout(timer)
+      return () => {
+        if (timeoutRef.current) {
+          clearTimeout(timeoutRef.current)
+        }
+      }
     }
-  }, [phase, connection, gameId, teamId])
-
-  // Periodically check if we should be in the reveal phase
-  useEffect(() => {
-    // Extra check to ensure we don't get stuck in waitingForAnswers
-    if (phase === 'waitingForAnswers' && hasReceivedAnswer) {
-      console.log(
-        'Detected inconsistency: received answer but still in waitingForAnswers phase, forcing to reveal phase'
-      )
-      setPhase('reveal')
-    }
-  }, [phase, hasReceivedAnswer])
+  }, [phase, hasReceivedAnswer, connection, gameId, teamId])
 
   const joinGame = async () => {
     try {
@@ -334,9 +372,12 @@ const Game = ({ token, gameId, setGameId, onLogout, connection }) => {
       )
       const newGameId = resp.data.gameId
       setGameId(newGameId)
-      setPhase('waiting')
+      changePhase('waiting')
       setAnswer('')
-      setCorrectAnswer(null)
+      updateGameState({
+        correctAnswer: null,
+        currentQuestionId: null,
+      })
       setTimeLeft(0)
       setJoinedTeams([teamId])
     } catch (error) {
@@ -362,128 +403,65 @@ const Game = ({ token, gameId, setGameId, onLogout, connection }) => {
 
   const handleWagerSelect = (val) => {
     setSelectedWager(val)
-    if (
-      connection &&
-      connection.state === signalR.HubConnectionState.Connected
-    ) {
+    if (connection?.state === signalR.HubConnectionState.Connected) {
       connection
-        .invoke('SubmitWager', gameId, teamId, val, currentQuestionId)
+        .invoke('SubmitWager', gameId, teamId, val, gameState.currentQuestionId)
         .catch((err) => console.error('Error sending wager:', err))
     }
   }
 
   const submitAnswer = async () => {
-    if (!currentQuestionId || !answer) {
-      alert('You must select an answer.')
+    if (!connection || !gameId || !gameState.currentQuestionId) {
+      console.error(
+        'Cannot submit answer: Missing game, question, or connection'
+      )
       return
     }
+
     if (!selectedWager) {
-      alert('Select a wager first.')
+      alert('Please select a wager')
       return
     }
-    if (
-      !connection ||
-      connection.state !== signalR.HubConnectionState.Connected
-    ) {
-      alert('Not connected to the hub.')
+
+    if (!answer) {
+      alert('Please select an answer')
       return
     }
+
+    console.log(`Submitting answer for question ${gameState.currentQuestionId}`)
+
     try {
       await connection.invoke(
         'SubmitAnswer',
         gameId,
         teamId,
-        currentQuestionId,
+        gameState.currentQuestionId,
         answer,
         selectedWager
       )
-
-      setTimeLeft(0)
-
-      // Only set the phase to waitingForAnswers if we haven't received an answer yet
-      if (!hasReceivedAnswer) {
-        setPhase('waitingForAnswers')
-      } else {
-        // If we've already received an answer, go straight to reveal
-        setPhase('reveal')
-      }
-    } catch (error) {
-      console.error('SubmitAnswer error:', error)
+      console.log('Answer submitted successfully')
+      console.log('line 443' + answer)
+    } catch (err) {
+      console.error('Error submitting answer:', err)
     }
   }
 
   const signalReadyForNext = async () => {
-    if (
-      connection &&
-      connection.state === signalR.HubConnectionState.Connected
-    ) {
+    if (connection?.state === signalR.HubConnectionState.Connected) {
       try {
-        console.log('Signaling ready for next question - user clicked button')
-        // Only mark as signaled if the call succeeds
+        console.log('Signaling ready for next question')
         await connection.invoke('SignalReadyForNext', gameId, teamId)
-        console.log(
-          'Successfully signaled ready for next question, setting button state'
-        )
         setHasSignaledReady(true)
-      } catch (error) {
-        console.error('Error signaling ready:', error)
-        // Don't update hasSignaledReady if there was an error
+      } catch (err) {
+        console.error('Error signaling ready:', err)
       }
     }
   }
 
-  // Add a listener for a new event "TeamSignaledReady" to show which teams have signaled ready
-  useEffect(() => {
-    // This effect sets up a listener for the TeamSignaledReady event
-    if (!connection) return
-
-    const handleTeamSignaledReady = (readyTeamId) => {
-      console.log(`Team ${readyTeamId} signaled ready`)
-      // If it's our team, update our UI state, but only if we're in the reveal phase
-      // This prevents automatically disabling the button when not needed
-      if (readyTeamId === teamId) {
-        console.log(`Our team ${teamId} signaled ready`)
-
-        // If we're in the reveal phase, update the button
-        if (phase === 'reveal') {
-          console.log(`We're in reveal phase, setting hasSignaledReady to true`)
-          setHasSignaledReady(true)
-        } else {
-          console.log(
-            `We're not in reveal phase (${phase}), NOT setting hasSignaledReady`
-          )
-        }
-      } else {
-        console.log(
-          `Team ${readyTeamId} signaled ready, but we're team ${teamId}, not updating button state`
-        )
-      }
-    }
-
-    connection.on('TeamSignaledReady', handleTeamSignaledReady)
-
-    return () => {
-      // Clean up when the component unmounts or connection changes
-      connection.off('TeamSignaledReady', handleTeamSignaledReady)
-    }
-  }, [connection, teamId, phase])
-
-  // Add an effect to force reset hasSignaledReady when entering reveal phase
-  useEffect(() => {
-    if (phase === 'reveal' && !hasReceivedAnswer) {
-      // If we just entered the reveal phase but haven't received an answer,
-      // make sure we reset the ready state
-      console.log(
-        'Entered reveal phase - explicitly ensuring ready button is enabled'
-      )
-      resetReadyState()
-    }
-  }, [phase, hasReceivedAnswer])
-
-  // Conditional rendering based on phase
+  // Render based on phase
   if (!gameId) {
     return (
-      <div>
+      <div className='game-container'>
         <h2>Join or Create a Game</h2>
         <label>
           Existing Game:
@@ -502,49 +480,66 @@ const Game = ({ token, gameId, setGameId, onLogout, connection }) => {
         </label>
         <button onClick={joinGame}>Join Game</button>
         {connectionError && <p style={{ color: 'red' }}>{connectionError}</p>}
-        <button onClick={onLogout}>Logout</button>
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
       </div>
     )
   }
 
   if (phase === 'waiting') {
     return (
-      <div>
+      <div className='game-container'>
         <h2>Game {gameId}: Waiting</h2>
         <p>Teams joined: {joinedTeams.join(', ')}</p>
         <button onClick={startGame}>Start Game</button>
-        <button onClick={onLogout}>Logout</button>
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
       </div>
     )
   }
 
   if (phase === 'waitingForAnswers') {
     return (
-      <div>
+      <div className='game-container'>
         <h2>Game {gameId}: Waiting for other teams</h2>
         <h3>
-          Round {round} – Question {questionNumber}
+          Round {round}: Question {questionNumber}
         </h3>
         <p>You&apos;ve submitted your answer.</p>
         <p>Waiting for other teams to submit their answers...</p>
-        <button onClick={onLogout}>Logout</button>
+        {hasReceivedAnswer ? (
+          <div className='answer-display'>
+            <h3>{gameState.correctAnswer}</h3>
+          </div>
+        ) : (
+          <div className='spinner-border' role='status'>
+            <span className='visually-hidden'>Loading...</span>
+          </div>
+        )}
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
       </div>
     )
   }
 
   if (phase === 'idle') {
     return (
-      <div>
+      <div className='game-container'>
         <h2>Game {gameId}: Idle</h2>
         <button onClick={startGame}>Start Game</button>
-        <button onClick={onLogout}>Logout</button>
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
       </div>
     )
   }
 
   if (connectionError) {
     return (
-      <div>
+      <div className='game-container'>
         <h2>Error</h2>
         <p>{connectionError}</p>
         <button onClick={onLogout}>Logout</button>
@@ -554,10 +549,10 @@ const Game = ({ token, gameId, setGameId, onLogout, connection }) => {
 
   if (phase === 'question') {
     return (
-      <div>
+      <div className='game-container'>
         {reconnecting && <p>Reconnecting…</p>}
         <h3>
-          Round {round} – Question {questionNumber}
+          Round {round}: Question {questionNumber}
         </h3>
         <p>
           <strong>{questionText}</strong>
@@ -594,34 +589,68 @@ const Game = ({ token, gameId, setGameId, onLogout, connection }) => {
           Submit Answer
         </button>
         <p>Time remaining: {timeLeft} seconds</p>
-        <button onClick={onLogout}>Logout</button>
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
       </div>
     )
   }
 
   if (phase === 'waitingForResults') {
     return (
-      <div>
+      <div className='game-container'>
         {reconnecting && <p>Reconnecting…</p>}
         <h3>
-          Round {round} – Question {questionNumber}
+          Round {round}: Question {questionNumber}
         </h3>
         <p>Your answer has been submitted. Waiting for results…</p>
-        <button onClick={onLogout}>Logout</button>
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
       </div>
     )
   }
 
   if (phase === 'reveal') {
     return (
-      <div>
+      <div className='game-container'>
         {reconnecting && <p>Reconnecting…</p>}
         <h3>
-          Round {round} – Question {questionNumber} Results
+          Round {round}: Question {questionNumber} Results
         </h3>
-        {correctAnswer && <p>{correctAnswer}</p>}
-        <p>Waiting for the host to trigger the next question…</p>
+        <br />
+
+        {correctAnswer && (
+          <p>
+            <b>Correct Answer:</b> {correctAnswer}
+          </p>
+        )}
+        {showOverlay && (
+          <div
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: '100%',
+              backgroundColor: isCorrect
+                ? 'rgba(0, 255, 0, 0.5)'
+                : 'rgba(255, 0, 0, 0.5)',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              zIndex: 1000,
+            }}
+          >
+            <h2 className='overlay_message'>{overlayMessage}</h2>
+            {isCorrect && <Confetti />}
+          </div>
+        )}
+        <br />
+        <br />
+        <p>Waiting for teams to signal ready...</p>
         <button
+          className='next_question_button'
           onClick={signalReadyForNext}
           disabled={hasSignaledReady}
           style={{
@@ -631,33 +660,39 @@ const Game = ({ token, gameId, setGameId, onLogout, connection }) => {
         >
           {hasSignaledReady ? 'Ready!' : 'Ready for Next Question'}
         </button>
-        <button onClick={onLogout}>Logout</button>
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
       </div>
     )
   }
 
   if (phase === 'ended') {
     return (
-      <div>
+      <div className='game-container'>
         <h2>Game Over</h2>
         <p>The game has ended. Thanks for playing!</p>
         <button
           onClick={() => {
             setGameId(null)
-            setPhase('idle')
+            changePhase('idle')
           }}
         >
           Back to Lobby
         </button>
-        <button onClick={onLogout}>Logout</button>
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
       </div>
     )
   }
 
   return (
-    <div>
+    <div className='game-container'>
       <p>Loading…</p>
-      <button onClick={onLogout}>Logout</button>
+      <button className='logout_button' onClick={onLogout}>
+        Logout
+      </button>
     </div>
   )
 }
@@ -668,6 +703,9 @@ Game.propTypes = {
   setGameId: PropTypes.func.isRequired,
   onLogout: PropTypes.func.isRequired,
   connection: PropTypes.object,
+  isReconnecting: PropTypes.bool,
+  gameState: PropTypes.object.isRequired,
+  updateGameState: PropTypes.func.isRequired,
 }
 
 export default Game
