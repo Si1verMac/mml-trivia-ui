@@ -45,3 +45,58 @@
   text-align: center;
   padding: 20px;
 }
+
+/* Halftime bonus and multi-question answer styles */
+.halftime-answer-list,
+.answer-list {
+  list-style-type: none;
+  padding: 0;
+  margin: 10px 0;
+}
+
+.halftime-answer-item {
+  background-color: #f8f9fa;
+  padding: 8px 12px;
+  margin: 5px 0;
+  border-radius: 4px;
+  border-left: 3px solid #4caf50;
+  text-align: left;
+  font-size: 1.1em;
+}
+
+.multi-question-answers {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  margin: 15px 0;
+}
+
+.multi-question-answer-item {
+  background-color: #f0f8ff;
+  padding: 10px;
+  border-radius: 6px;
+  border-left: 4px solid #2196f3;
+  text-align: left;
+}
+
+.multi-question-answer-item p {
+  margin: 5px 0;
+}
+
+.multi-question-answer-item strong {
+  display: block;
+  font-size: 1.1em;
+  margin-bottom: 5px;
+}
+
+.correct-answer-display {
+  margin: 20px 0;
+  padding: 15px;
+  background-color: #f0f8ff;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.correct-answer-display p {
+  font-size: 1.2em;
+}

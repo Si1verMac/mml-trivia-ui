@@ -1,0 +1,1793 @@
+import { useState, useEffect, useRef } from 'react'
+import axios from 'axios'
+import { jwtDecode } from 'jwt-decode'
+import * as signalR from '@microsoft/signalr'
+import PropTypes from 'prop-types'
+import Confetti from 'react-confetti'
+
+const Game = ({
+  token,
+  gameId,
+  setGameId,
+  onLogout,
+  connection,
+  isReconnecting,
+  gameState,
+  updateGameState,
+}) => {
+  const decoded = jwtDecode(token)
+  const teamId = parseInt(decoded.teamId, 10)
+
+  // UI state
+  const [phase, setPhase] = useState(gameState.currentPhase || 'idle')
+  const [round, setRound] = useState(gameState.question?.round || 1)
+  const [questionNumber, setQuestionNumber] = useState(
+    gameState.question?.questionNumber || 1
+  )
+  const [questionText, setQuestionText] = useState(
+    gameState.question?.text || ''
+  )
+  const [answerOptions, setAnswerOptions] = useState(
+    gameState.question?.options || []
+  )
+  const [selectedWager, setSelectedWager] = useState(null)
+  const [answer, setAnswer] = useState('')
+  const [timeLeft, setTimeLeft] = useState(gameState.timeLeft || 0)
+  const [connectionError, setConnectionError] = useState(null)
+  const [reconnecting, setReconnecting] = useState(false)
+  const [joinedTeams, setJoinedTeams] = useState([])
+  const [activeGames, setActiveGames] = useState([])
+  const [selectedGameId, setSelectedGameId] = useState('')
+  const [hasSignaledReady, setHasSignaledReady] = useState(false)
+  const [hasReceivedAnswer, setHasReceivedAnswer] = useState(false)
+  const [answeredQuestions, setAnsweredQuestions] = useState(new Set())
+  const [showOverlay, setShowOverlay] = useState(false)
+  const [overlayMessage, setOverlayMessage] = useState('')
+  const [isCorrect, setIsCorrect] = useState(false)
+  const [correctAnswer, setCorrectAnswer] = useState('')
+  const [teamAnswerCorrect, setTeamAnswerCorrect] = useState(null)
+
+  const timeoutRef = useRef(null)
+  const eventsRegistered = useRef(false)
+  const timerRef = useRef(null) // New ref to track active timer
+  const initializedRef = useRef(false) // Track if we've done the initial timeLeft sync
+
+  // Sync initial timeLeft from gameState on first render
+  useEffect(() => {
+    // Only initialize once and only if we have a value to initialize with
+    if (!initializedRef.current && gameState.timeLeft > 0) {
+      console.log(
+        `One-time timer initialization from gameState: ${gameState.timeLeft} seconds`
+      )
+      setTimeLeft(gameState.timeLeft)
+      initializedRef.current = true
+    }
+  }, [gameState.timeLeft])
+
+  // Sync App gameState with local UI state
+  useEffect(() => {
+    if (gameState.currentPhase !== phase) {
+      console.log(
+        `Updating local phase to ${gameState.currentPhase} from ${phase} (App gameState changed)`
+      )
+      setPhase(gameState.currentPhase)
+    }
+
+    if (gameState.question && gameState.question.text !== questionText) {
+      console.log('Updating local question from App gameState')
+      if (gameState.question.round) setRound(gameState.question.round)
+      if (gameState.question.questionNumber)
+        setQuestionNumber(gameState.question.questionNumber)
+      if (gameState.question.text) setQuestionText(gameState.question.text)
+      if (gameState.question.options)
+        setAnswerOptions(gameState.question.options)
+    }
+
+    if (gameState.correctAnswer && gameState.correctAnswer !== '') {
+      console.log(gameState.correctAnswer + 'Line 73')
+      setHasReceivedAnswer(true)
+    }
+  }, [gameState, phase, questionText])
+
+  // Set up SignalR events with stable dependencies
+  useEffect(() => {
+    if (!connection || !gameId || eventsRegistered.current) return
+
+    console.log('Registering Game component event handlers')
+
+    connection.on('GameStarted', (data) => {
+      console.log('GameStarted event received:', data)
+      changePhase('question')
+    })
+
+    connection.on('TeamJoined', ({ teamId: joinedId }) => {
+      console.log(`Team ${joinedId} joined the game`)
+      setJoinedTeams((prev) =>
+        prev.includes(joinedId) ? prev : [...prev, joinedId]
+      )
+    })
+
+    connection.on('GameState', (state) => {
+      console.log('GameState received:', state)
+      if (
+        state.status === 'InProgress' &&
+        (phase === 'idle' || phase === 'waiting')
+      ) {
+        changePhase('question')
+      } else if (
+        state.status === 'Created' &&
+        phase !== 'question' &&
+        phase !== 'reveal' &&
+        phase !== 'waitingForAnswers'
+      ) {
+        changePhase('waiting')
+      } else if (state.status === 'Ended') {
+        changePhase('ended')
+      }
+    })
+
+    connection.on('GameEnded', () => {
+      console.log('GameEnded event')
+      changePhase('ended')
+      setTimeLeft(0)
+    })
+
+    connection.on('DisplayAnswer', (questionId, correctAnswer) => {
+      console.log('DisplayAnswer event received:', questionId + correctAnswer)
+      //const { questionId, correctAnswer } = data
+
+      // Handle different answer formats based on question type
+      const questionType = gameState.questionType || 'regular'
+      const questionTextLower = (gameState.question?.text || '').toLowerCase()
+      let parsedAnswer = correctAnswer || ''
+
+      // Preserve current question information for display during reveal
+      const currentRound = gameState.question?.round || round
+      const currentQuestionNumber =
+        gameState.question?.questionNumber || questionNumber
+      const currentQuestionText = gameState.question?.text || questionText
+
+      // Check for lightning question for proper display during reveal
+      const isLightningQuestion =
+        questionType === 'lightning' ||
+        currentQuestionNumber === 10 ||
+        extractQuestionNumber(currentQuestionText) === 10 ||
+        (currentQuestionText && questionTextLower.includes('lightning'))
+
+      // Check for halftime bonus
+      const isHalftimeBonus =
+        questionType === 'halftimeBonus' ||
+        currentQuestionNumber === 11 ||
+        extractQuestionNumber(currentQuestionText) === 11 ||
+        (currentQuestionText && questionTextLower.includes('halftime bonus'))
+
+      console.log('DisplayAnswer question type check:', {
+        questionType,
+        currentQuestionNumber,
+        extractedNumber: extractQuestionNumber(currentQuestionText),
+        isLightning: isLightningQuestion,
+        isHalftimeBonus: isHalftimeBonus,
+        text: currentQuestionText?.substring(0, 30),
+      })
+
+      // If it's a halftime bonus question, try to parse the answer array
+      if (isHalftimeBonus) {
+        try {
+          // Check if answer starts with { and ends with } indicating it's a JSON array
+          if (
+            correctAnswer &&
+            ((correctAnswer.startsWith('{') && correctAnswer.endsWith('}')) ||
+              correctAnswer.includes(';'))
+          ) {
+            // If it's a standard comma/semicolon separated list
+            if (correctAnswer.includes(';')) {
+              parsedAnswer = correctAnswer
+                .split(';')
+                .map((a) => a.trim().toLowerCase())
+              console.log(
+                'Split halftime answers by semicolon and normalized:',
+                parsedAnswer
+              )
+            }
+            // If it looks like JSON format
+            else if (correctAnswer.startsWith('{')) {
+              try {
+                // First try to parse as valid JSON
+                try {
+                  parsedAnswer = JSON.parse(correctAnswer)
+                } catch (e) {
+                  // If that fails, try to clean up the format by removing braces and splitting
+                  const cleanedAnswers = correctAnswer
+                    .replace(/^\{|\}$/g, '') // Remove outer braces
+                    .split(/","|",|"/) // Split by various quote+comma patterns
+                    .map((a) => a.trim().replace(/^"|"$/g, '')) // Clean up quotes
+                    .filter((a) => a.length > 0) // Remove empty strings
+                    .map(a => a.toLowerCase()) // Normalize to lowercase
+                  
+                  parsedAnswer = cleanedAnswers
+                  console.log('Cleaned and normalized halftime answers:', parsedAnswer)
+                }
+
+                // If we have a valid array, normalize it
+                if (Array.isArray(parsedAnswer)) {
+                  parsedAnswer = parsedAnswer.map((a) =>
+                    typeof a === 'string' ? a.trim().toLowerCase() : a
+                  )
+                }
+
+                console.log(
+                  'Parsed and normalized halftime answers from JSON:',
+                  parsedAnswer
+                )
+              } catch (e) {
+                console.error('Failed to parse JSON answer:', e)
+              }
+            }
+          } else if (correctAnswer) {
+            // If it's just a single string, try to split by commas or semicolons
+            const answerSeparators = /[,;]/
+            if (answerSeparators.test(correctAnswer)) {
+              parsedAnswer = correctAnswer
+                .split(answerSeparators)
+                .map((a) => a.trim().toLowerCase())
+                .filter((a) => a.length > 0)
+              console.log(
+                'Split and normalized single string halftime answer:',
+                parsedAnswer
+              )
+            } else {
+              // Just use as is but lowercase
+              parsedAnswer = correctAnswer.toLowerCase()
+            }
+          }
+        } catch (e) {
+          console.error('Error parsing halftime answer:', e)
+          parsedAnswer = correctAnswer
+        }
+      }
+
+      setCorrectAnswer(parsedAnswer)
+
+      // Set timeLeft directly to avoid dependency on gameState
+      setTimeLeft(0)
+
+      console.log('Parsed answer:', parsedAnswer)
+
+      // Customize overlay message based on question type
+      if (teamAnswerCorrect !== null) {
+        setIsCorrect(teamAnswerCorrect)
+
+        // Special message for lightning questions
+        if (isLightningQuestion) {
+          setOverlayMessage(
+            teamAnswerCorrect
+              ? `Lightning Bonus! You earned points!`
+              : `Incorrect lightning answer.`
+          )
+        }
+        // Special message for halftime bonus
+        else if (isHalftimeBonus) {
+          setOverlayMessage(
+            teamAnswerCorrect
+              ? `Halftime Bonus! You earned points!`
+              : `Incorrect halftime answer.`
+          )
+        }
+        // Regular question message
+        else {
+          setOverlayMessage(
+            teamAnswerCorrect
+              ? `Congratulations! You won ${selectedWager || 0} points!`
+              : `Ope! You lost ${selectedWager || 0}.`
+          )
+        }
+
+        setShowOverlay(true)
+        setTimeout(() => {
+          setShowOverlay(false)
+          setTeamAnswerCorrect(null) // Clear after overlay hides
+        }, 5000)
+      }
+
+      setAnsweredQuestions((prev) => {
+        const updated = new Set(prev)
+        updated.add(questionId)
+        return updated
+      })
+
+      // Update gameState after setting local state directly
+      updateGameState({
+        currentQuestionId: questionId,
+        correctAnswer: `${correctAnswer || ''}`,
+        currentPhase: 'reveal',
+        timeLeft: 0, // Set timeLeft to 0 in gameState for this phase
+        // Preserve the question type and info for proper reveal display
+        questionType: isLightningQuestion
+          ? 'lightning'
+          : isHalftimeBonus
+          ? 'halftimeBonus'
+          : questionType,
+        revealInfo: {
+          round: currentRound,
+          questionNumber: currentQuestionNumber,
+          isLightning: isLightningQuestion,
+          isHalftimeBonus: isHalftimeBonus,
+        },
+      })
+
+      console.log('Updated gameState for reveal phase:', {
+        questionType: isLightningQuestion
+          ? 'lightning'
+          : isHalftimeBonus
+          ? 'halftimeBonus'
+          : questionType,
+        round: currentRound,
+        questionNumber: currentQuestionNumber,
+      })
+
+      setHasReceivedAnswer(true)
+      setHasSignaledReady(false)
+
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current)
+        timeoutRef.current = null
+      }
+    })
+
+    connection.on('Question', (qData) => {
+      console.log('Question event received:', qData)
+      if (!qData || !qData.id) {
+        console.error('Received invalid question data')
+        return
+      }
+      const questionId = qData.id
+      if (answeredQuestions.has(questionId)) {
+        console.log(`Already answered question ${questionId}`)
+        return
+      }
+
+      // Map database question types to frontend types
+      // Database types: "Regular", "Lightning", "Halftime", "Final"
+      // Frontend types: "regular", "lightning", "halftimeBonus", "halftimeBreak", "finalWager", "multiQuestion"
+      let questionType = 'regular'
+
+      // First check if the question text contains specific indicators
+      const questionTextLower = (qData.text || '').toLowerCase()
+
+      // More aggressive checks for question numbers in the text
+      // Extract question number from text if available
+      const extractedNumber = extractQuestionNumber(qData.text)
+      const hasLightningInText =
+        qData.text &&
+        (qData.text.includes('Lightning') ||
+          qData.text.includes('10.') ||
+          questionTextLower.includes('lightning'))
+
+      // ROUND 5 DETECTION - Add specific check for Round 5
+      const isRound5 =
+        qData.round === 5 ||
+        (qData.text && qData.text.includes('Round 5')) ||
+        (qData.text && qData.text.toLowerCase().includes('fill in the blank'))
+
+      console.log('Round detection check:', {
+        round: qData.round,
+        isRound5: isRound5,
+        text: qData.text?.substring(0, 30) || '',
+      })
+
+      // Check both the questionType field and the question text for determining type
+      if (qData.questionType) {
+        // Convert to lowercase for case-insensitive comparison
+        const dbType = qData.questionType.toLowerCase()
+
+        // More specific checks first
+        if (
+          dbType === 'lightning' ||
+          hasLightningInText ||
+          extractedNumber === 10 ||
+          (qData.questionNumber && qData.questionNumber === 10)
+        ) {
+          questionType = 'lightning'
+          console.log('Detected LIGHTNING question type', {
+            dbType,
+            text: qData.text,
+            extractedNumber,
+            questionNumber: qData.questionNumber,
+          })
+        } else if (
+          dbType === 'halftime' ||
+          questionTextLower.includes('halftime bonus') ||
+          extractedNumber === 11 ||
+          (qData.questionNumber && qData.questionNumber === 11)
+        ) {
+          questionType = 'halftimeBonus'
+          console.log('Detected HALFTIME BONUS question type')
+        } else if (
+          dbType === 'final' ||
+          questionTextLower.includes('final') ||
+          extractedNumber === 24
+        ) {
+          questionType = 'finalWager'
+          console.log('Detected FINAL question type')
+        } else if (dbType === 'halftimebreak') {
+          questionType = 'halftimeBreak'
+        } else if (isRound5) {
+          questionType = 'multiQuestion'
+          console.log('Detected ROUND 5 MULTI-QUESTION type')
+        }
+      }
+
+      // Special case for multi-question format (Round 5)
+      // Check for JSON format OR if it's Round 5
+      if (
+        (qData.text &&
+          typeof qData.text === 'string' &&
+          qData.text.startsWith('{')) ||
+        isRound5
+      ) {
+        questionType = 'multiQuestion'
+        console.log('Detected MULTI-QUESTION type (Round 5 or JSON format)')
+      }
+
+      console.log(
+        `Mapped question type: ${
+          qData.questionType || 'unspecified'
+        } → ${questionType} (Question ID: ${questionId})`
+      )
+
+      // Force lightning type for question 10 regardless of other indicators
+      if (qData.questionNumber === 10 || extractedNumber === 10) {
+        questionType = 'lightning'
+        console.log('FORCED lightning type based on question number 10')
+      }
+
+      // Force Round 5 multi-question type
+      if (qData.round === 5 || isRound5) {
+        questionType = 'multiQuestion'
+        console.log('FORCED multi-question type based on Round 5')
+      }
+
+      // Set timer based on question type - Set local state directly
+      let newTimeLeft = 0
+      if (questionType === 'halftimeBreak') {
+        // Halftime break is 15 minutes (900 seconds)
+        newTimeLeft = 900
+      } else {
+        newTimeLeft = 150 // Regular timer for other questions
+      }
+
+      // Set local state first - this ensures the timer shows immediately
+      setTimeLeft(newTimeLeft)
+
+      // Save time in gameState for persistence across dashboard toggling
+      // This won't affect our component since we already set local state
+      updateGameState({
+        currentQuestionId: questionId,
+        question: qData,
+        correctAnswer: null,
+        currentPhase:
+          questionType === 'halftimeBreak' ? 'halftimeBreak' : 'question',
+        questionType: questionType,
+        timeLeft: newTimeLeft,
+      })
+
+      setRound(qData.round || 1)
+      setQuestionNumber(qData.questionNumber || 1)
+      setQuestionText(qData.text || '')
+
+      // Set wager based on question type
+      if (questionType === 'finalWager') {
+        // Final wager defaults to max of 15
+        setSelectedWager(15)
+      } else if (questionType === 'lightning') {
+        // Lightning questions don't need wager
+        setSelectedWager(0)
+      } else {
+        // Reset wager for regular questions
+        setSelectedWager(null)
+      }
+
+      setAnswer('')
+      setHasReceivedAnswer(false)
+      setHasSignaledReady(false)
+      setShowOverlay(false) // Ensure overlay is off
+
+      // Handle answer options based on question type
+      if (questionType === 'halftimeBonus') {
+        // For halftime bonus, initialize with empty array for multiple answers
+        setAnswerOptions([])
+        setAnswer(JSON.stringify([])) // Initialize as empty JSON array
+        setSelectedWager(0) // Set wager to 0 for halftimeBonus
+      } else if (questionType === 'multiQuestion') {
+        // For Round 5 with 8 questions at once
+        try {
+          // Check if data is already in JSON format with object structure
+          if (
+            qData.text &&
+            qData.text.startsWith('{') &&
+            qData.text.includes(':')
+          ) {
+            // Standard object format with keys
+            const questionsData = JSON.parse(qData.text)
+            setQuestionText('Round 5: Fill in the blanks')
+            setAnswerOptions(questionsData)
+          }
+          // Check if it's an array of strings in JSON format
+          else if (
+            qData.text &&
+            qData.text.startsWith('{') &&
+            qData.text.includes('"')
+          ) {
+            // This handles the format {"q1", "q2", ...} common in the database
+            console.log('Detected array format for Round 5 questions')
+
+            // More aggressive cleaning for malformed JSON
+            // Log the raw text for debugging
+            console.log('Raw Round 5 questions text:', qData.text)
+
+            try {
+              // IMPROVED PARSER: Better handling for the specific malformed format
+              // This format is seen in the database: {"12. Where does Colonel Forbin go", "13. Another question", ...}
+
+              // First remove the outer braces
+              let cleanedText = qData.text.replace(/^\{|\}$/g, '')
+
+              // Add proper JSON array brackets and fix the comma+quote pattern
+              cleanedText =
+                '[' +
+                cleanedText.replace(/","/g, '","').replace(/",\s+"/g, '","') +
+                ']'
+
+              // Handle special case where the closing quote might be missing on the last item
+              cleanedText = cleanedText.replace(/",]$/, '"]')
+
+              // Try to parse with new format first
+              let questionsArray = []
+
+              try {
+                // Try to parse as proper JSON array
+                questionsArray = JSON.parse(cleanedText)
+                console.log(
+                  'Successfully parsed Round 5 questions as JSON array:',
+                  questionsArray
+                )
+              } catch (jsonError) {
+                console.error(
+                  'Failed to parse as JSON array, using regex fallback:',
+                  jsonError
+                )
+
+                // Fallback to the previous regex approach
+                questionsArray = qData.text
+                  .replace(/^\{|\}$/g, '') // Remove outer braces
+                  .split(/","|",|",\s+"/g) // Split by various formats of comma+quote combinations
+                  .map((q) => q.trim().replace(/^"|"$/g, '')) // Remove quotes
+                  .filter((q) => q.length > 0) // Remove empty strings
+              }
+
+              console.log('Extracted questions:', questionsArray)
+
+              // Create proper question objects
+              const questionsData = {}
+              questionsArray.forEach((question, index) => {
+                questionsData[`q${index + 1}`] = {
+                  id: `q${index + 1}`,
+                  text: question,
+                }
+              })
+
+              setQuestionText('Round 5: Fill in the blanks')
+              setAnswerOptions(questionsData)
+              console.log('Created question data structure:', questionsData)
+            } catch (e) {
+              console.error('Error parsing multi-question data:', e)
+              setQuestionText(qData.text || '')
+              setAnswerOptions([])
+            }
+          } else {
+            // Create a default structure as before
+            console.log('Creating default Round 5 structure')
+            const defaultQuestions = {}
+
+            // Try to parse options if available
+            let options = []
+            if (Array.isArray(qData.options)) {
+              options = qData.options
+            } else if (typeof qData.options === 'string') {
+              try {
+                options = JSON.parse(qData.options)
+              } catch (e) {
+                console.error('Failed to parse options string:', e)
+                // Try to extract from malformed JSON
+                if (
+                  qData.options.startsWith('{') &&
+                  qData.options.includes('"')
+                ) {
+                  options = qData.options
+                    .replace(/^\{|\}$/g, '')
+                    .split(',')
+                    .map((q) => q.trim().replace(/^"|"$/g, ''))
+                } else {
+                  options = []
+                }
+              }
+            }
+
+            // If we have options, use them to build the questions
+            if (options.length > 0) {
+              options.forEach((opt, idx) => {
+                defaultQuestions[`q${idx + 1}`] = {
+                  text: opt,
+                  id: `q${idx + 1}`,
+                }
+              })
+            } else {
+              // Default structure with empty questions
+              for (let i = 1; i <= 8; i++) {
+                defaultQuestions[`q${i}`] = {
+                  text: `Question ${i}`,
+                  id: `q${i}`,
+                }
+              }
+            }
+
+            setQuestionText('Round 5: Fill in the blanks')
+            setAnswerOptions(defaultQuestions)
+            console.log('Created default Round 5 structure:', defaultQuestions)
+          }
+
+          // Initialize answers as empty object
+          setAnswer(JSON.stringify({}))
+          setSelectedWager(0) // Set wager to 0 for multiQuestion
+        } catch (e) {
+          console.error('Error parsing multi-question data:', e)
+          setQuestionText(qData.text || '')
+          setAnswerOptions([])
+        }
+      } else if (Array.isArray(qData.options)) {
+        // Regular question with array options
+        setAnswerOptions(qData.options)
+      } else if (typeof qData.options === 'string') {
+        // Regular question with string options that need parsing
+        try {
+          setAnswerOptions(JSON.parse(qData.options))
+        } catch (e) {
+          console.error('Error parsing options:', e)
+          setAnswerOptions([])
+        }
+      }
+    })
+
+    connection.on(
+      'AnswerSubmitted',
+      ({ teamId: submittedTeamId, isCorrect }) => {
+        console.log(
+          `Team ${submittedTeamId} answer submitted. Correct: ${isCorrect}`
+        )
+        if (submittedTeamId === teamId) {
+          console.log('Our team submitted an answer')
+          setTeamAnswerCorrect(isCorrect) // Set current correctness
+          if (gameState.currentQuestionId) {
+            setAnsweredQuestions((prev) => {
+              const updated = new Set(prev)
+              updated.add(gameState.currentQuestionId)
+              return updated
+            })
+          }
+          changePhase('waitingForAnswers')
+        }
+      }
+    )
+
+    connection.on('TeamSignaledReady', (readyTeamId) => {
+      if (parseInt(readyTeamId, 10) === teamId && phase === 'reveal') {
+        console.log(`Our team signaled ready`)
+        setHasSignaledReady(true)
+      }
+    })
+
+    eventsRegistered.current = true
+
+    return () => {
+      if (connection) {
+        connection.off('GameStarted')
+        connection.off('TeamJoined')
+        connection.off('GameState')
+        connection.off('GameEnded')
+        connection.off('DisplayAnswer')
+        connection.off('Question')
+        connection.off('AnswerSubmitted')
+        connection.off('TeamSignaledReady')
+        eventsRegistered.current = false
+        console.log('Unregistered Game component event handlers')
+      }
+    }
+  }, [connection, gameId, selectedWager, gameState.currentQuestionId, phase])
+
+  // Helper to change phase both locally and in App
+  const changePhase = (newPhase) => {
+    console.log(`Changing phase from ${phase} to ${newPhase}`)
+    setPhase(newPhase)
+    updateGameState({ currentPhase: newPhase })
+  }
+
+  // Handle wager selection - moved up before timer useEffect
+  const handleWagerSelect = (val) => {
+    setSelectedWager(val)
+    if (connection?.state === signalR.HubConnectionState.Connected) {
+      connection
+        .invoke('SubmitWager', gameId, teamId, val, gameState.currentQuestionId)
+        .catch((err) => console.error('Error sending wager:', err))
+    }
+  }
+
+  // Fetch active games
+  useEffect(() => {
+    axios
+      .get('https://localhost:7169/api/game/active', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      .then((resp) => setActiveGames(resp.data))
+      .catch((err) => console.error('Error fetching active games:', err))
+  }, [token])
+
+  // Join the game when connection is established
+  useEffect(() => {
+    if (!gameId || !connection) return
+
+    const joinGameAsync = async () => {
+      if (connection.state === signalR.HubConnectionState.Disconnected) {
+        console.log('Connection is disconnected, waiting for reconnect')
+        return
+      }
+
+      try {
+        console.log(`Joining game ${gameId} as team ${teamId}`)
+
+        // Check if we're returning from dashboard (preserved state)
+        const isReturningFromDashboard = gameState.preservedFromToggle === true
+
+        if (isReturningFromDashboard) {
+          console.log(
+            'Returning from dashboard, preserving current question state'
+          )
+          // Only join the group without requesting a new game state
+          await connection.invoke('JoinGameSilently', gameId, teamId)
+        } else {
+          // Normal join with game state update
+          await connection.invoke('JoinGame', gameId, teamId)
+        }
+      } catch (err) {
+        console.error('Error joining game:', err)
+      }
+    }
+
+    joinGameAsync()
+  }, [gameId, connection, teamId, gameState.preservedFromToggle])
+
+  // Handle reconnection status
+  useEffect(() => {
+    if (isReconnecting) {
+      setConnectionError('Reconnecting...')
+      setReconnecting(true)
+    } else if (connection?.state === signalR.HubConnectionState.Connected) {
+      setConnectionError(null)
+      setReconnecting(false)
+    }
+  }, [isReconnecting, connection])
+
+  // Timer logic
+  useEffect(() => {
+    // Clear any existing timer first
+    if (timerRef.current) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+    }
+
+    // Only start timer if we have time left and are in appropriate phase
+    if ((phase === 'question' || phase === 'halftimeBreak') && timeLeft > 0) {
+      console.log(
+        `Starting timer for phase ${phase} with ${timeLeft} seconds remaining`
+      )
+
+      timerRef.current = setInterval(() => {
+        setTimeLeft((prev) => {
+          const newTimeLeft = prev - 1
+
+          // If timer reaches 0, clean up and handle expiry
+          if (newTimeLeft <= 0) {
+            if (timerRef.current) {
+              clearInterval(timerRef.current)
+              timerRef.current = null
+            }
+
+            // Handle different behaviors based on phase
+            if (phase === 'question') {
+              // Get the effective question type using the same logic as render
+              const questionType = gameState.questionType || 'regular'
+              let effectiveType = questionType
+
+              const questionNumber = gameState.question?.questionNumber || ''
+              const questionTextLower = (
+                gameState.question?.text || ''
+              ).toLowerCase()
+              const extractedNumber = extractQuestionNumber(
+                gameState.question?.text
+              )
+
+              if (
+                questionNumber === 10 ||
+                extractedNumber === 10 ||
+                questionTextLower.includes('lightning')
+              ) {
+                effectiveType = 'lightning'
+              } else if (
+                questionNumber === 11 ||
+                extractedNumber === 11 ||
+                questionTextLower.includes('halftime bonus')
+              ) {
+                effectiveType = 'halftimeBonus'
+              }
+
+              console.log(`Timer expired for question type: ${effectiveType}`)
+
+              // Auto-select minimum wager for regular questions if none selected
+              if (effectiveType === 'regular' && !selectedWager) {
+                console.log(
+                  'Timer expired - auto-selecting wager=1 for regular question'
+                )
+                handleWagerSelect(1)
+              }
+
+              // Change to waiting phase
+              changePhase('waitingForResults')
+
+              // Notify server that timer expired
+              if (connection?.state === signalR.HubConnectionState.Connected) {
+                console.log('Notifying server that timer expired')
+                connection
+                  .invoke(
+                    'HandleTimerExpiry',
+                    gameId,
+                    gameState.currentQuestionId
+                  )
+                  .catch((err) =>
+                    console.error('Error invoking HandleTimerExpiry:', err)
+                  )
+              }
+            } else if (phase === 'halftimeBreak' && !hasSignaledReady) {
+              // For halftime break, signal ready automatically
+              if (connection?.state === signalR.HubConnectionState.Connected) {
+                console.log(
+                  'Halftime timer expired, automatically signaling ready'
+                )
+                connection
+                  .invoke('SignalReadyForNext', gameId, teamId)
+                  .then(() => setHasSignaledReady(true))
+                  .catch((err) =>
+                    console.error('Error signaling ready after halftime:', err)
+                  )
+              }
+            }
+
+            return 0
+          }
+
+          return newTimeLeft
+        })
+      }, 1000)
+    }
+
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current)
+        timerRef.current = null
+      }
+    }
+  }, [
+    phase,
+    gameId,
+    teamId,
+    connection,
+    gameState.currentQuestionId,
+    gameState.questionType,
+    gameState.question,
+    selectedWager,
+    hasSignaledReady,
+    changePhase,
+    handleWagerSelect,
+  ])
+
+  // Check if we're stuck in waiting phase
+  useEffect(() => {
+    if (phase === 'waitingForAnswers' && !hasReceivedAnswer) {
+      console.log('Setting up stuck check for waitingForAnswers phase')
+
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current)
+      }
+
+      timeoutRef.current = setTimeout(() => {
+        if (phase === 'waitingForAnswers' && !hasReceivedAnswer) {
+          console.log(
+            'Still waiting for answers after timeout, requesting game state'
+          )
+          if (connection?.state === signalR.HubConnectionState.Connected) {
+            connection
+              .invoke('RequestGameState', gameId, teamId)
+              .catch((err) =>
+                console.error('Error requesting game state:', err)
+              )
+          }
+        }
+      }, 5000)
+
+      return () => {
+        if (timeoutRef.current) {
+          clearTimeout(timeoutRef.current)
+        }
+      }
+    }
+  }, [phase, hasReceivedAnswer, connection, gameId, teamId])
+
+  const joinGame = async () => {
+    try {
+      const payload = {
+        teamIds: [teamId],
+        gameId: selectedGameId ? parseInt(selectedGameId, 10) : null,
+      }
+      const resp = await axios.post(
+        'https://localhost:7169/api/game/join',
+        payload,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      )
+      const newGameId = resp.data.gameId
+      setGameId(newGameId)
+      changePhase('waiting')
+      setAnswer('')
+      updateGameState({
+        correctAnswer: null,
+        currentQuestionId: null,
+      })
+      setTimeLeft(0)
+      setJoinedTeams([teamId])
+    } catch (error) {
+      console.error('joinGame error:', error)
+      alert(error.response?.data?.error || error.message)
+    }
+  }
+
+  const startGame = async () => {
+    try {
+      await axios.post(
+        'https://localhost:7169/api/game/start',
+        { gameId },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      )
+    } catch (err) {
+      console.error('startGame error:', err)
+      alert(err.response?.data?.error || err.message)
+    }
+  }
+
+  // Enhanced submitAnswer function with better debugging
+  const submitAnswer = async () => {
+    if (!connection || !gameId || !gameState.currentQuestionId) {
+      console.error(
+        'Cannot submit answer: Missing game, question, or connection'
+      )
+      return
+    }
+
+    // Get current question type
+    const questionType = gameState.questionType || 'regular'
+
+    // Apply the same override logic as in the render function
+    let effectiveType = questionType
+    const questionNumber = gameState.question?.questionNumber || ''
+    const questionTextLower = (gameState.question?.text || '').toLowerCase()
+    const extractedNumber = extractQuestionNumber(gameState.question?.text)
+    const hasLightningInText =
+      questionText &&
+      (questionText.includes('Lightning') ||
+        questionText.includes('10.') ||
+        questionTextLower.includes('lightning'))
+
+    // Check for Round 4 or Round 5
+    const isRound4 = gameState.question?.round === 4
+    const isHalftimeBonus =
+      questionType === 'halftimeBonus' ||
+      questionNumber === 11 ||
+      extractedNumber === 11 ||
+      questionTextLower.includes('halftime bonus')
+    const isRound5 =
+      gameState.question?.round === 5 ||
+      (gameState.question?.text &&
+        gameState.question.text.toLowerCase().includes('fill in the blank'))
+
+    // More aggressive detection of Lightning questions
+    if (questionNumber === 10 || extractedNumber === 10 || hasLightningInText) {
+      effectiveType = 'lightning'
+      console.log('Submit handler: Detected LIGHTNING question', {
+        questionNumber,
+        extractedNumber,
+        text: gameState.question?.text,
+      })
+    } else if (isHalftimeBonus) {
+      effectiveType = 'halftimeBonus'
+      console.log('Submit handler: Detected HALFTIME BONUS question', {
+        questionNumber,
+        extractedNumber,
+        text: gameState.question?.text,
+      })
+    } else if (isRound5) {
+      effectiveType = 'multiQuestion'
+      console.log('Submit handler: Detected ROUND 5 question')
+    }
+
+    console.log('Submit handler determining question type:', {
+      originalType: questionType,
+      effectiveType: effectiveType,
+      round: gameState.question?.round,
+      text: gameState.question?.text,
+      questionNumber,
+    })
+
+    // Only check for wager on questions that require it
+    if (
+      effectiveType !== 'lightning' &&
+      effectiveType !== 'halftimeBonus' &&
+      effectiveType !== 'multiQuestion' &&
+      !selectedWager
+    ) {
+      alert('Please select a wager')
+      return
+    }
+
+    if (!answer) {
+      alert('Please select an answer')
+      return
+    }
+
+    console.log(
+      `Submitting answer for question ${gameState.currentQuestionId} (type: ${effectiveType}, round: ${gameState.question?.round})`
+    )
+
+    try {
+      // For special question types, auto-set the wager appropriately
+      let finalWager = selectedWager
+      if (effectiveType === 'lightning') {
+        // Lightning questions use 0 wager but award points through special logic
+        finalWager = 0
+        console.log(
+          'Using 0 wager for Lightning question (points awarded through special logic)'
+        )
+      } else if (
+        effectiveType === 'halftimeBonus' ||
+        effectiveType === 'multiQuestion'
+      ) {
+        // Halftime bonus and Round 5 questions use 0 wager but award 1 point per correct answer
+        finalWager = 0
+        console.log(
+          'Using 0 wager for special question - points awarded per correct answer'
+        )
+      }
+
+      // Format answer for certain round types
+      let finalAnswer = answer
+
+      // Special handling for different types
+      if (effectiveType === 'halftimeBonus') {
+        // Make sure halftime answers are properly formatted
+        try {
+          const parsedAnswers = JSON.parse(answer)
+          console.log('Submitting halftime answers:', parsedAnswers)
+
+          // Clean up any empty strings in the array
+          const cleanedAnswers = parsedAnswers.filter(
+            (a) => a && a.trim().length > 0
+          )
+
+          // Convert all answers to lowercase for better matching
+          const normalizedAnswers = cleanedAnswers.map((a) =>
+            a.trim().toLowerCase()
+          )
+
+          // Log the normalized answers to help with debugging
+          console.log(
+            'Normalized halftime answers for submission:',
+            normalizedAnswers
+          )
+
+          // Use normalized answers for final submission
+          finalAnswer = JSON.stringify(normalizedAnswers)
+        } catch (e) {
+          console.error('Error formatting halftime answers:', e)
+          // Try to handle non-JSON answer as a fallback
+          if (typeof answer === 'string') {
+            // Convert to array and normalize
+            const answers = answer
+              .split(/[,;]/)
+              .map((a) => a.trim().toLowerCase())
+              .filter((a) => a.length > 0)
+            finalAnswer = JSON.stringify(answers)
+            console.log('Fallback halftime answers:', answers)
+          }
+        }
+      } else if (
+        effectiveType === 'multiQuestion' &&
+        typeof answer === 'string' &&
+        answer.startsWith('{')
+      ) {
+        // Make sure multiQuestion answers are properly formatted
+        console.log('Submitting multiQuestion answers:', answer)
+        try {
+          const parsedAnswers = JSON.parse(answer)
+          // Clean up any empty answers
+          const cleanedAnswers = {}
+          let hasAnswers = false
+
+          Object.entries(parsedAnswers).forEach(([key, value]) => {
+            if (value && value.trim().length > 0) {
+              cleanedAnswers[key] = value.trim()
+              hasAnswers = true
+            }
+          })
+
+          if (hasAnswers) {
+            finalAnswer = JSON.stringify(cleanedAnswers)
+            console.log('Cleaned multiQuestion answers:', cleanedAnswers)
+          } else {
+            alert('Please enter at least one answer')
+            return
+          }
+        } catch (e) {
+          console.error('Error formatting multiQuestion answers:', e)
+        }
+      } else if (isRound4) {
+        // Extra logging for Round 4 answers
+        console.log('Submitting Round 4 answer:', {
+          answer,
+          wager: finalWager,
+          questionId: gameState.currentQuestionId,
+        })
+      }
+
+      console.log(
+        `Final submission: answer=${finalAnswer}, wager=${finalWager}`
+      )
+
+      await connection.invoke(
+        'SubmitAnswer',
+        gameId,
+        teamId,
+        gameState.currentQuestionId,
+        finalAnswer,
+        finalWager
+      )
+      console.log('Answer submitted successfully')
+      console.log('Answer value: ' + finalAnswer)
+    } catch (err) {
+      console.error('Error submitting answer:', err)
+      alert(`Error submitting answer: ${err.message}`)
+    }
+  }
+
+  const signalReadyForNext = async () => {
+    if (connection?.state === signalR.HubConnectionState.Connected) {
+      try {
+        console.log('Signaling ready for next question')
+        await connection.invoke('SignalReadyForNext', gameId, teamId)
+        setHasSignaledReady(true)
+      } catch (err) {
+        console.error('Error signaling ready:', err)
+      }
+    }
+  }
+
+  // Helper to extract question number from question text (e.g., "9. Lightning" → 9)
+  const extractQuestionNumber = (text) => {
+    if (!text) return null
+
+    // Look for patterns like "9." or "9:" at start of text
+    const match = text.match(/^\s*(\d+)[.:]\s*/)
+    if (match) {
+      const num = parseInt(match[1], 10)
+      console.log(
+        `Extracted question number ${num} from text: "${text.substring(
+          0,
+          20
+        )}..."`
+      )
+      return num
+    }
+    return null
+  }
+
+  // Render based on phase
+  if (!gameId) {
+    return (
+      <div className='game-container'>
+        <h2>Join or Create a Game</h2>
+        <label>
+          Existing Game:
+          <select
+            value={selectedGameId}
+            onChange={(e) => setSelectedGameId(e.target.value)}
+          >
+            <option value=''>Create New Game</option>
+            {activeGames.map((g) => (
+              <option key={g.id} value={g.id}>
+                Game {g.id} - created at{' '}
+                {new Date(g.createdAt).toLocaleString()}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button onClick={joinGame}>Join Game</button>
+        {connectionError && <p style={{ color: 'red' }}>{connectionError}</p>}
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
+      </div>
+    )
+  }
+
+  if (phase === 'waiting') {
+    return (
+      <div className='game-container'>
+        <h2>Game {gameId}: Waiting</h2>
+        <p>Teams joined: {joinedTeams.join(', ')}</p>
+        <button onClick={startGame}>Start Game</button>
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
+      </div>
+    )
+  }
+
+  if (phase === 'waitingForAnswers') {
+    return (
+      <div className='game-container'>
+        <h2>Game {gameId}: Waiting for other teams</h2>
+        <h3>
+          Round {round}: Question {questionNumber}
+        </h3>
+        <p>You&apos;ve submitted your answer.</p>
+        <p>Waiting for other teams to submit their answers...</p>
+        {hasReceivedAnswer ? (
+          <div className='answer-display'>
+            <h3>{gameState.correctAnswer}</h3>
+          </div>
+        ) : (
+          <div className='spinner-border' role='status'>
+            <span className='visually-hidden'>Loading...</span>
+          </div>
+        )}
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
+      </div>
+    )
+  }
+
+  if (phase === 'idle') {
+    return (
+      <div className='game-container'>
+        <h2>Game {gameId}: Idle</h2>
+        <button onClick={startGame}>Start Game</button>
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
+      </div>
+    )
+  }
+
+  if (connectionError) {
+    return (
+      <div className='game-container'>
+        <h2>Error</h2>
+        <p>{connectionError}</p>
+        <button onClick={onLogout}>Logout</button>
+      </div>
+    )
+  }
+
+  if (phase === 'question') {
+    // Determine the question type
+    const questionType = gameState.questionType || 'regular'
+
+    // Get the question text and number for additional verification
+    const questionNumber = gameState.question?.questionNumber || ''
+    const questionTextLower = questionText.toLowerCase()
+    const extractedNumber = extractQuestionNumber(questionText)
+    const hasLightningInText =
+      questionText &&
+      (questionText.includes('Lightning') ||
+        questionText.includes('10.') ||
+        questionTextLower.includes('lightning'))
+
+    // Enhanced logging to help debug type issues
+    console.log(`Rendering UI for question type: ${questionType}`)
+    console.log(`Question data:`, {
+      id: gameState.currentQuestionId,
+      type: questionType,
+      questionNumber: questionNumber,
+      extractedNumber: extractedNumber,
+      hasLightningInText,
+      text:
+        questionText.substring(0, 50) + (questionText.length > 50 ? '...' : ''),
+    })
+
+    // Add special case handling based on question number or content
+    let effectiveType = questionType
+
+    // If question number indicates it's question #10 or contains Lightning text, it's a lightning question
+    if (questionNumber === 10 || extractedNumber === 10 || hasLightningInText) {
+      effectiveType = 'lightning'
+      console.log(
+        'Overriding to LIGHTNING question type based on question number/content'
+      )
+    }
+    // If question number indicates it's question #11 and should be halftime bonus
+    else if (
+      questionNumber === 11 ||
+      extractedNumber === 11 ||
+      questionTextLower.includes('halftime bonus')
+    ) {
+      effectiveType = 'halftimeBonus'
+      console.log(
+        'Overriding to HALFTIME BONUS question type based on question number/content'
+      )
+    }
+
+    // Force lightning type for question 10 or any question with Lightning in the text
+    if (questionNumber === 10 || extractedNumber === 10 || hasLightningInText) {
+      effectiveType = 'lightning'
+      console.log('FORCED lightning type in render function')
+    }
+
+    if (effectiveType !== questionType) {
+      console.log(`Question type override: ${questionType} → ${effectiveType}`)
+    }
+
+    // Different rendering based on effective question type
+    if (effectiveType === 'lightning') {
+      return (
+        <div className='game-container'>
+          {reconnecting && <p>Reconnecting…</p>}
+          <h3>Lightning Bonus Question!</h3>
+          <p className='bonus-explanation'>
+            First team with correct answer gets +5 points
+            <br />
+            Second team gets +3 points
+            <br />
+            All other correct answers get +1 point
+            <br />
+            No negative points for wrong answers
+          </p>
+          <p>
+            <strong>{questionText}</strong>
+          </p>
+          <div>
+            {answerOptions.map((opt) => (
+              <label key={opt} style={{ display: 'block' }}>
+                <input
+                  type='radio'
+                  name='answerChoice'
+                  value={opt}
+                  checked={answer === opt}
+                  onChange={() => setAnswer(opt)}
+                />
+                {opt}
+              </label>
+            ))}
+          </div>
+          <button
+            onClick={submitAnswer}
+            disabled={!answer}
+            style={{
+              backgroundColor: '#4CAF50',
+              color: 'white',
+              fontWeight: 'bold',
+              fontSize: '1.1em',
+              padding: '12px 24px',
+            }}
+          >
+            Submit Lightning Answer
+          </button>
+          <p>Time remaining: {timeLeft} seconds</p>
+          <button className='logout_button' onClick={onLogout}>
+            Logout
+          </button>
+        </div>
+      )
+    } else if (effectiveType === 'halftimeBonus') {
+      // Parse the current answers
+      let currentAnswers = []
+      try {
+        currentAnswers = JSON.parse(answer)
+      } catch {
+        currentAnswers = []
+      }
+
+      return (
+        <div className='game-container'>
+          {reconnecting && <p>Reconnecting…</p>}
+          <h3>Halftime Bonus Round</h3>
+          <p className='bonus-explanation'>
+            Fill in up to 8 answers. Each correct answer is worth 1 point.
+            <br />
+            +1 bonus point for getting all 8 correct!
+          </p>
+          <p>
+            <strong>{questionText}</strong>
+          </p>
+
+          <div className='halftime-answers'>
+            {[...Array(8)].map((_, index) => (
+              <div key={index} className='halftime-answer-input'>
+                <label>{index + 1}.</label>
+                <input
+                  type='text'
+                  value={currentAnswers[index] || ''}
+                  onChange={(e) => {
+                    const newAnswers = [...currentAnswers]
+                    newAnswers[index] = e.target.value
+                    setAnswer(JSON.stringify(newAnswers))
+                  }}
+                />
+              </div>
+            ))}
+          </div>
+
+          <button
+            onClick={submitAnswer}
+            disabled={currentAnswers.every((a) => !a)}
+          >
+            Submit Answers
+          </button>
+          <p>Time remaining: {timeLeft} seconds</p>
+          <button className='logout_button' onClick={onLogout}>
+            Logout
+          </button>
+        </div>
+      )
+    } else if (effectiveType === 'multiQuestion') {
+      // Parse the multi-question answers
+      let currentAnswers = {}
+      try {
+        currentAnswers = JSON.parse(answer)
+      } catch {
+        currentAnswers = {}
+      }
+
+      return (
+        <div className='game-container'>
+          {reconnecting && <p>Reconnecting…</p>}
+          <h3>Round 5: Fill-in-the-Blank</h3>
+          <p className='bonus-explanation'>
+            Answer all 8 questions. Each correct answer is worth 1 point.
+          </p>
+
+          <div className='multi-questions'>
+            {Object.entries(answerOptions).map(([id, questionData]) => (
+              <div key={id} className='multi-question-item'>
+                <p>
+                  <strong>{questionData.text}</strong>
+                </p>
+                <input
+                  type='text'
+                  value={currentAnswers[id] || ''}
+                  onChange={(e) => {
+                    const newAnswers = { ...currentAnswers }
+                    newAnswers[id] = e.target.value
+                    setAnswer(JSON.stringify(newAnswers))
+                  }}
+                />
+              </div>
+            ))}
+          </div>
+
+          <button
+            onClick={submitAnswer}
+            disabled={Object.keys(currentAnswers).length === 0}
+          >
+            Submit All Answers
+          </button>
+          <p>Time remaining: {timeLeft} seconds</p>
+          <button className='logout_button' onClick={onLogout}>
+            Logout
+          </button>
+        </div>
+      )
+    } else if (effectiveType === 'finalWager') {
+      return (
+        <div className='game-container'>
+          {reconnecting && <p>Reconnecting…</p>}
+          <h3>Final Wager Question</h3>
+          <p className='bonus-explanation'>
+            This is the final question! You can wager up to 15 points.
+          </p>
+          <p>
+            <strong>{questionText}</strong>
+          </p>
+          <div>
+            <p>Select your wager (up to 15 points):</p>
+            <input
+              type='number'
+              min='1'
+              max='15'
+              value={selectedWager || 15}
+              onChange={(e) => {
+                const value = Math.min(
+                  15,
+                  Math.max(1, parseInt(e.target.value) || 1)
+                handleWagerSelect(value)
+              }}
+            />
+          </div>
+          <p>Selected wager: {selectedWager || 15}</p>
+          <div>
+            <p>Your answer:</p>
+            <input
+              type='text'
+              value={answer}
+              onChange={(e) => setAnswer(e.target.value)}
+            />
+          </div>
+          <button onClick={submitAnswer} disabled={!answer || !selectedWager}>
+            Submit Final Answer
+          </button>
+          <p>Time remaining: {timeLeft} seconds</p>
+          <button className='logout_button' onClick={onLogout}>
+            Logout
+          </button>
+        </div>
+      )
+    } else {
+      // Regular question rendering
+      return (
+        <div className='game-container'>
+          {reconnecting && <p>Reconnecting…</p>}
+          <h3>
+            Round {round}: Question {questionNumber}
+          </h3>
+          <p>
+            <strong>{questionText}</strong>
+          </p>
+          <div>
+            <p>Select your wager:</p>
+            {[1, 3, 5].map((w) => (
+              <button
+                key={w}
+                onClick={() => handleWagerSelect(w)}
+                style={{ fontWeight: selectedWager === w ? 'bold' : 'normal' }}
+              >
+                {w} pts
+              </button>
+            ))}
+          </div>
+          <p>Selected wager: {selectedWager || 0}</p>
+          <div>
+            <p>Choose your answer:</p>
+            {answerOptions.map((opt) => (
+              <label key={opt} style={{ display: 'block' }}>
+                <input
+                  type='radio'
+                  name='answerChoice'
+                  value={opt}
+                  checked={answer === opt}
+                  onChange={() => setAnswer(opt)}
+                />
+                {opt}
+              </label>
+            ))}
+          </div>
+          <button onClick={submitAnswer} disabled={!answer || !selectedWager}>
+            Submit Answer
+          </button>
+          <p>Time remaining: {timeLeft} seconds</p>
+          <button className='logout_button' onClick={onLogout}>
+            Logout
+          </button>
+        </div>
+      )
+    }
+  }
+
+  if (phase === 'waitingForResults') {
+    return (
+      <div className='game-container'>
+        {reconnecting && <p>Reconnecting…</p>}
+        <h3>
+          Round {round}: Question {questionNumber}
+        </h3>
+        <p>Your answer has been submitted. Waiting for results…</p>
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
+      </div>
+    )
+  }
+
+  if (phase === 'reveal') {
+    // Check if this was a lightning question from the stored information
+    const wasLightningQuestion =
+      gameState.questionType === 'lightning' ||
+      (gameState.revealInfo && gameState.revealInfo.isLightning)
+
+    // Check if this was a halftime bonus question
+    const wasHalftimeBonus =
+      gameState.questionType === 'halftimeBonus' ||
+      (gameState.revealInfo && gameState.revealInfo.isHalftimeBonus)
+
+    const displayRound = gameState.revealInfo?.round || round
+    const displayQuestionNumber =
+      gameState.revealInfo?.questionNumber || questionNumber
+
+    console.log('Reveal phase info:', {
+      wasLightning: wasLightningQuestion,
+      wasHalftimeBonus: wasHalftimeBonus,
+      questionType: gameState.questionType,
+      revealInfo: gameState.revealInfo,
+    })
+
+    return (
+      <div className='game-container'>
+        {reconnecting && <p>Reconnecting…</p>}
+        <h3>
+          {wasLightningQuestion
+            ? 'Lightning Bonus Question Results'
+            : wasHalftimeBonus
+            ? 'Halftime Bonus Results'
+            : `Round ${displayRound}: Question ${displayQuestionNumber} Results`}
+        </h3>
+        <br />
+
+        {correctAnswer && (
+          <div className='correct-answer-display'>
+            <p>
+              <b>Correct Answer:</b>
+            </p>
+            {Array.isArray(correctAnswer) ? (
+              <ul className='halftime-answer-list'>
+                {correctAnswer.map((ans, idx) => (
+                  <li key={idx}>{ans}</li>
+                ))}
+              </ul>
+            ) : (
+              <p>{correctAnswer}</p>
+            )}
+          </div>
+        )}
+        {showOverlay && (
+          <div
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: '100%',
+              backgroundColor: isCorrect
+                ? 'rgba(0, 255, 0, 0.5)'
+                : 'rgba(255, 0, 0, 0.5)',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              zIndex: 1000,
+            }}
+          >
+            <h2 className='overlay_message'>{overlayMessage}</h2>
+            {isCorrect && <Confetti />}
+          </div>
+        )}
+        <br />
+        <br />
+        <p>Waiting for teams to signal ready...</p>
+        <button
+          className='next_question_button'
+          onClick={signalReadyForNext}
+          disabled={hasSignaledReady}
+          style={{
+            backgroundColor: hasSignaledReady ? '#4CAF50' : '',
+            color: hasSignaledReady ? 'white' : '',
+          }}
+        >
+          {hasSignaledReady ? 'Ready!' : 'Ready for Next Question'}
+        </button>
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
+      </div>
+    )
+  }
+
+  if (phase === 'ended') {
+    return (
+      <div className='game-container'>
+        <h2>Game Over</h2>
+        <p>The game has ended. Thanks for playing!</p>
+        <button
+          onClick={() => {
+            setGameId(null)
+            changePhase('idle')
+          }}
+        >
+          Back to Lobby
+        </button>
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
+      </div>
+    )
+  }
+
+  if (phase === 'halftimeBreak') {
+    return (
+      <div className='game-container'>
+        {reconnecting && <p>Reconnecting…</p>}
+        <h2>Halftime Break</h2>
+        <p className='halftime-message'>
+          Take a 15-minute break before the second half begins!
+        </p>
+
+        <div className='timer-container'>
+          <p className='big-timer'>
+            {Math.floor(timeLeft / 60)}:
+            {(timeLeft % 60).toString().padStart(2, '0')}
+          </p>
+        </div>
+
+        <p className='halftime-message'>
+          Coming up after the break: Round 5 with 8 fill-in-the-blank questions!
+        </p>
+        <p>Click &quot;Ready&quot; when your team is ready to continue.</p>
+
+        <button
+          className='next_question_button'
+          onClick={signalReadyForNext}
+          disabled={hasSignaledReady}
+          style={{
+            backgroundColor: hasSignaledReady ? '#4CAF50' : '',
+            color: hasSignaledReady ? 'white' : '',
+            padding: '12px 24px',
+            fontSize: '1.2rem',
+            margin: '20px 0',
+          }}
+        >
+          {hasSignaledReady ? 'Ready!' : 'Ready to Continue'}
+        </button>
+        <button className='logout_button' onClick={onLogout}>
+          Logout
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className='game-container'>
+      <p>Loading…</p>
+      <button className='logout_button' onClick={onLogout}>
+        Logout
+      </button>
+    </div>
+  )
+}
+
+Game.propTypes = {
+  token: PropTypes.string.isRequired,
+  gameId: PropTypes.number,
+  setGameId: PropTypes.func.isRequired,
+  onLogout: PropTypes.func.isRequired,
+  connection: PropTypes.object,
+  isReconnecting: PropTypes.bool,
+  gameState: PropTypes.object.isRequired,
+  updateGameState: PropTypes.func.isRequired,
+}
+
+export default Game

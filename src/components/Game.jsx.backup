@@ -144,406 +144,300 @@ const Game = ({
       setTimeLeft(0)
     })
 
-    connection.on(
-      'DisplayAnswer',
-      (
-        questionId,
-        correctAnswer,
-        isCorrectFromServer,
-        wager,
-        scoreChangeFromServer
-      ) => {
-        console.log(
-          'DisplayAnswer event received:',
-          questionId,
-          correctAnswer,
-          isCorrectFromServer,
-          wager,
-          scoreChangeFromServer
-        )
-        const questionType = gameState.questionType || 'regular'
-        const questionTextLower =
-          typeof gameState.question?.text === 'string'
-            ? gameState.question.text.toLowerCase()
-            : Array.isArray(gameState.question?.text) &&
-              gameState.question.text.length > 0
-            ? gameState.question.text[0].toLowerCase()
+    connection.on('DisplayAnswer', (questionId, correctAnswer) => {
+      console.log('DisplayAnswer event received:', questionId, correctAnswer)
+      const questionType = gameState.questionType || 'regular'
+      const questionTextLower =
+        typeof gameState.question?.text === 'string'
+          ? gameState.question.text.toLowerCase()
+          : Array.isArray(gameState.question?.text) &&
+            gameState.question.text.length > 0
+          ? gameState.question.text[0].toLowerCase()
+          : ''
+      let parsedAnswer = correctAnswer || ''
+
+      // Clean any answer format regardless of question type
+      if (typeof parsedAnswer === 'string') {
+        // Remove curly braces if present
+        if (parsedAnswer.startsWith('{') && parsedAnswer.endsWith('}')) {
+          parsedAnswer = parsedAnswer.substring(1, parsedAnswer.length - 1)
+        }
+        // Remove quotes if present
+        if (parsedAnswer.startsWith('"') && parsedAnswer.endsWith('"')) {
+          parsedAnswer = parsedAnswer.substring(1, parsedAnswer.length - 1)
+        }
+      }
+
+      // Preserve current question information for display during reveal
+      const currentRound = gameState.question?.round || round
+      const currentQuestionNumber =
+        gameState.question?.questionNumber || questionNumber
+      const currentQuestionText = gameState.question?.text || questionText
+
+      // Check for lightning question for proper display during reveal
+      const isLightningQuestion =
+        questionType === 'lightning' ||
+        currentQuestionNumber === 10 ||
+        extractQuestionNumber(
+          typeof currentQuestionText === 'string'
+            ? currentQuestionText
+            : Array.isArray(currentQuestionText) &&
+              currentQuestionText.length > 0
+            ? currentQuestionText[0]
             : ''
-        let parsedAnswer = correctAnswer || ''
+        ) === 10 ||
+        questionTextLower.includes('lightning')
 
-        // Preserve current question information for display during reveal
-        const currentRound = gameState.question?.round || round
-        const currentQuestionNumber =
-          gameState.question?.questionNumber || questionNumber
-        const currentQuestionText = gameState.question?.text || questionText
+      // Check for halftime bonus
+      const isHalftimeBonus =
+        questionType === 'halftimeBonus' ||
+        currentQuestionNumber === 11 ||
+        extractQuestionNumber(
+          typeof currentQuestionText === 'string'
+            ? currentQuestionText
+            : Array.isArray(currentQuestionText) &&
+              currentQuestionText.length > 0
+            ? currentQuestionText[0]
+            : ''
+        ) === 11 ||
+        questionTextLower.includes('halftime bonus')
 
-        // More precise check for halftime bonus and multi-question
-        const isHalftimeBonusType =
-          questionType === 'halftimeBonus' ||
-          (questionType !== 'lightning' &&
-            questionType !== 'finalWager' &&
-            questionTextLower.includes('halftime bonus'))
+      // Check for Round 5 multi-question
+      const isMultiQuestion =
+        questionType === 'multiQuestion' ||
+        currentRound === 5 ||
+        (typeof currentQuestionText === 'string' &&
+          currentQuestionText.startsWith('{')) ||
+        Array.isArray(currentQuestionText)
 
-        const isMultiQuestionType =
-          questionType === 'multiQuestion' ||
-          (questionType !== 'lightning' &&
-            questionType !== 'finalWager' &&
-            questionType !== 'halftimeBonus' &&
-            (questionTextLower.includes('fill in the blank') ||
-              currentRound === 5))
-
-        console.log('Question type diagnosis:', {
-          type: questionType,
-          isHalftimeBonusType,
-          isMultiQuestionType,
-          scoreChangeFromServer,
-        })
-
-        // Store the scoreChangeFromServer as a local variable
-        let pointsEarned = 0
-
-        // For halftime bonus and multi-question, we need to show the correct points
-        if (isHalftimeBonusType || isMultiQuestionType) {
-          if (scoreChangeFromServer !== undefined) {
-            // If server sent a score, use it
-            pointsEarned = scoreChangeFromServer
-            console.log(`Using server-provided score: ${pointsEarned}`)
-
-            // Only update necessary fields to avoid infinite loops
-            updateGameState((prevState) => ({
-              ...prevState,
-              scoreChange: scoreChangeFromServer,
-            }))
-          } else if (gameState.scoreChange !== undefined) {
-            // Fallback to the stored score if available
-            pointsEarned = gameState.scoreChange
-            console.log(`No server score, using stored score: ${pointsEarned}`)
-          }
-
-          console.log(`Final points value for overlay: ${pointsEarned}`)
-        }
-
-        // Clean any answer format regardless of question type
-        if (typeof parsedAnswer === 'string') {
-          // Remove curly braces if present
-          if (parsedAnswer.startsWith('{') && parsedAnswer.endsWith('}')) {
-            parsedAnswer = parsedAnswer.substring(1, parsedAnswer.length - 1)
-          }
-          // Remove quotes if present
-          if (parsedAnswer.startsWith('"') && parsedAnswer.endsWith('"')) {
-            parsedAnswer = parsedAnswer.substring(1, parsedAnswer.length - 1)
-          }
-        }
-
-        // Check for lightning question for proper display during reveal
-        const isLightningQuestion =
-          questionType === 'lightning' ||
-          currentQuestionNumber === 10 ||
-          extractQuestionNumber(
-            typeof currentQuestionText === 'string'
-              ? currentQuestionText
-              : Array.isArray(currentQuestionText) &&
-                currentQuestionText.length > 0
-              ? currentQuestionText[0]
-              : ''
-          ) === 10 ||
-          questionTextLower.includes('lightning')
-
-        // Check for halftime bonus
-        const isHalftimeBonus =
-          questionType === 'halftimeBonus' ||
-          currentQuestionNumber === 11 ||
-          extractQuestionNumber(
-            typeof currentQuestionText === 'string'
-              ? currentQuestionText
-              : Array.isArray(currentQuestionText) &&
-                currentQuestionText.length > 0
-              ? currentQuestionText[0]
-              : ''
-          ) === 11 ||
-          questionTextLower.includes('halftime bonus')
-
-        // Check for Round 5 multi-question
-        const isMultiQuestion =
-          questionType === 'multiQuestion' ||
-          currentRound === 5 ||
-          (typeof currentQuestionText === 'string' &&
-            currentQuestionText.startsWith('{')) ||
-          Array.isArray(currentQuestionText)
-
-        // Function to split comma-separated answers for Round 5
-        // eslint-disable-next-line no-unused-vars
-        const splitMultiQuestionAnswers = (answerString) => {
-          if (!answerString || typeof answerString !== 'string')
-            return answerString
-
-          // If the string is in the format "{answer1,answer2,...}"
-          if (answerString.startsWith('{') && answerString.endsWith('}')) {
-            // Remove the curly braces
-            const withoutBraces = answerString.substring(
-              1,
-              answerString.length - 1
-            )
-            // Split by commas
-            return withoutBraces.split(',').map((a) => a.trim())
-          }
-
-          // If it's just a comma-separated string without braces
-          if (answerString.includes(',')) {
-            return answerString.split(',').map((a) => a.trim())
-          }
-
+      // Function to split comma-separated answers for Round 5
+      // eslint-disable-next-line no-unused-vars
+      const splitMultiQuestionAnswers = (answerString) => {
+        if (!answerString || typeof answerString !== 'string')
           return answerString
+
+        // If the string is in the format "{answer1,answer2,...}"
+        if (answerString.startsWith('{') && answerString.endsWith('}')) {
+          // Remove the curly braces
+          const withoutBraces = answerString.substring(
+            1,
+            answerString.length - 1
+          )
+          // Split by commas
+          return withoutBraces.split(',').map((a) => a.trim())
         }
 
-        // Handle the halftimeBonus answers specially
-        if (isHalftimeBonus) {
-          console.log(
-            'Processing halftimeBonus correct answers:',
-            correctAnswer
-          )
+        // If it's just a comma-separated string without braces
+        if (answerString.includes(',')) {
+          return answerString.split(',').map((a) => a.trim())
+        }
 
-          // Handle array answers directly from database
-          if (Array.isArray(correctAnswer)) {
-            // Clean each answer
-            parsedAnswer = correctAnswer.map((answer) => {
-              if (typeof answer === array) {
-                let cleaned = answer.trim()
-                // Remove curly braces
+        return answerString
+      }
+
+      // Handle the halftimeBonus answers specially
+      if (isHalftimeBonus) {
+        console.log('Processing halftimeBonus correct answers:', correctAnswer)
+
+        // Handle array answers directly from database
+        if (Array.isArray(correctAnswer)) {
+          // Clean each answer
+          parsedAnswer = correctAnswer.map((answer) => {
+            if (typeof answer === array) {
+              let cleaned = answer.trim()
+              // Remove curly braces
+              if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
+                cleaned = cleaned.substring(1, cleaned.length - 1).trim()
+              }
+              // Remove quotes
+              if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
+                cleaned = cleaned.substring(1, cleaned.length - 1).trim()
+              }
+              return cleaned
+            }
+            return answer
+          })
+        }
+        // Handle string that might be JSON or comma-separated
+        else if (typeof correctAnswer === 'string') {
+          // First, try to parse as JSON
+          try {
+            // Clean the string first
+            let cleanedAnswer = correctAnswer
+            if (cleanedAnswer.startsWith('"') && cleanedAnswer.endsWith('"')) {
+              cleanedAnswer = cleanedAnswer.substring(
+                1,
+                cleanedAnswer.length - 1
+              )
+            }
+
+            if (cleanedAnswer.startsWith('[') && cleanedAnswer.endsWith(']')) {
+              const parsed = JSON.parse(cleanedAnswer)
+              if (Array.isArray(parsed)) {
+                parsedAnswer = parsed.map((item) => {
+                  if (typeof item === 'string') {
+                    let cleaned = item.trim()
+                    // Clean quotes and braces
+                    if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
+                      cleaned = cleaned.substring(1, cleaned.length - 1).trim()
+                    }
+                    if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
+                      cleaned = cleaned.substring(1, cleaned.length - 1).trim()
+                    }
+                    return cleaned
+                  }
+                  return item
+                })
+              }
+            }
+            // Handle comma-separated values (most common format for halftimeBonus)
+            else if (
+              cleanedAnswer.includes(',') &&
+              !cleanedAnswer.includes(';') &&
+              !cleanedAnswer.startsWith('{')
+            ) {
+              parsedAnswer = cleanedAnswer.split(',').map((a) => {
+                let cleaned = a.trim()
+                // Clean quotes and braces
                 if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
                   cleaned = cleaned.substring(1, cleaned.length - 1).trim()
                 }
-                // Remove quotes
                 if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
                   cleaned = cleaned.substring(1, cleaned.length - 1).trim()
                 }
                 return cleaned
-              }
-              return answer
-            })
-          }
-          // Handle string that might be JSON or comma-separated
-          else if (typeof correctAnswer === 'string') {
-            // First, try to parse as JSON
-            try {
-              // Clean the string first
-              let cleanedAnswer = correctAnswer
-              if (
-                cleanedAnswer.startsWith('"') &&
-                cleanedAnswer.endsWith('"')
-              ) {
-                cleanedAnswer = cleanedAnswer.substring(
-                  1,
-                  cleanedAnswer.length - 1
-                )
-              }
-
-              if (
-                cleanedAnswer.startsWith('[') &&
-                cleanedAnswer.endsWith(']')
-              ) {
-                const parsed = JSON.parse(cleanedAnswer)
-                if (Array.isArray(parsed)) {
-                  parsedAnswer = parsed.map((item) => {
-                    if (typeof item === 'string') {
-                      let cleaned = item.trim()
-                      // Clean quotes and braces
-                      if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
-                        cleaned = cleaned
-                          .substring(1, cleaned.length - 1)
-                          .trim()
-                      }
-                      if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
-                        cleaned = cleaned
-                          .substring(1, cleaned.length - 1)
-                          .trim()
-                      }
-                      return cleaned
-                    }
-                    return item
-                  })
+              })
+              console.log('Split halftimeBonus answers by comma:', parsedAnswer)
+            }
+            // Handle semicolon-separated values
+            else if (cleanedAnswer.includes(';')) {
+              parsedAnswer = cleanedAnswer.split(';').map((a) => {
+                let cleaned = a.trim()
+                // Clean quotes and braces
+                if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
+                  cleaned = cleaned.substring(1, cleaned.length - 1).trim()
                 }
-              }
-              // Handle comma-separated values (most common format for halftimeBonus)
-              else if (
-                cleanedAnswer.includes(',') &&
-                !cleanedAnswer.includes(';') &&
-                !cleanedAnswer.startsWith('{')
-              ) {
-                parsedAnswer = cleanedAnswer.split(',').map((a) => {
-                  let cleaned = a.trim()
-                  // Clean quotes and braces
-                  if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
-                    cleaned = cleaned.substring(1, cleaned.length - 1).trim()
-                  }
-                  if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
-                    cleaned = cleaned.substring(1, cleaned.length - 1).trim()
-                  }
-                  return cleaned
-                })
-                console.log(
-                  'Split halftimeBonus answers by comma:',
-                  parsedAnswer
-                )
-              }
-              // Handle semicolon-separated values
-              else if (cleanedAnswer.includes(';')) {
-                parsedAnswer = cleanedAnswer.split(';').map((a) => {
-                  let cleaned = a.trim()
-                  // Clean quotes and braces
-                  if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
-                    cleaned = cleaned.substring(1, cleaned.length - 1).trim()
-                  }
-                  if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
-                    cleaned = cleaned.substring(1, cleaned.length - 1).trim()
-                  }
-                  return cleaned
-                })
-              }
-            } catch (e) {
-              console.error('Failed to parse halftimeBonus answers:', e)
-              // If JSON parsing fails but we have comma-separated values, split by commas
-              if (correctAnswer.includes(',')) {
-                parsedAnswer = correctAnswer.split(',').map((a) => a.trim())
-                console.log(
-                  'Fallback: Split halftimeBonus by commas after parse failure:',
-                  parsedAnswer
-                )
-              } else {
-                // Fallback to treating as a single answer
-                parsedAnswer = [correctAnswer.trim()]
-              }
+                if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
+                  cleaned = cleaned.substring(1, cleaned.length - 1).trim()
+                }
+                return cleaned
+              })
+            }
+          } catch (e) {
+            console.error('Failed to parse halftimeBonus answers:', e)
+            // If JSON parsing fails but we have comma-separated values, split by commas
+            if (correctAnswer.includes(',')) {
+              parsedAnswer = correctAnswer.split(',').map((a) => a.trim())
+              console.log(
+                'Fallback: Split halftimeBonus by commas after parse failure:',
+                parsedAnswer
+              )
+            } else {
+              // Fallback to treating as a single answer
+              parsedAnswer = [correctAnswer.trim()]
             }
           }
-        } else if (isMultiQuestion) {
-          console.log(
-            'Processing multiQuestion correct answers:',
-            correctAnswer
-          )
-
-          // Use our special parser to handle the comma-separated answers
-          parsedAnswer = parseMultiQuestionAnswers(correctAnswer)
-          console.log('Parsed multiQuestion answers:', parsedAnswer)
         }
+      } else if (isMultiQuestion) {
+        console.log('Processing multiQuestion correct answers:', correctAnswer)
 
-        setCorrectAnswer(parsedAnswer)
-        setTimeLeft(0)
+        // Use our special parser to handle the comma-separated answers
+        parsedAnswer = parseMultiQuestionAnswers(correctAnswer)
+        console.log('Parsed multiQuestion answers:', parsedAnswer)
+      }
 
-        // Properly parse the multi-question answers for display in the reveal phase
+      setCorrectAnswer(parsedAnswer)
+      setTimeLeft(0)
+
+      // Properly parse the multi-question answers for display in the reveal phase
+      if (
+        isMultiQuestion &&
+        Array.isArray(parsedAnswer) &&
+        parsedAnswer.length === 1 &&
+        typeof parsedAnswer[0] === 'string'
+      ) {
+        const answerString = parsedAnswer[0]
+
+        // If it's a single string with comma-separated values inside braces
         if (
-          isMultiQuestion &&
-          Array.isArray(parsedAnswer) &&
-          parsedAnswer.length === 1 &&
-          typeof parsedAnswer[0] === 'string'
+          answerString.startsWith('{') &&
+          answerString.endsWith('}') &&
+          answerString.includes(',')
         ) {
-          const answerString = parsedAnswer[0]
+          // Remove the braces and split by commas
+          const withoutBraces = answerString.substring(
+            1,
+            answerString.length - 1
+          )
+          const splitAnswers = withoutBraces.split(',').map((a) => a.trim())
 
-          // If it's a single string with comma-separated values inside braces
-          if (
-            answerString.startsWith('{') &&
-            answerString.endsWith('}') &&
-            answerString.includes(',')
-          ) {
-            // Remove the braces and split by commas
-            const withoutBraces = answerString.substring(
-              1,
-              answerString.length - 1
-            )
-            const splitAnswers = withoutBraces.split(',').map((a) => a.trim())
+          // Replace the parsedAnswer with the split array
+          console.log('Split multi-question answers by commas:', splitAnswers)
+          setCorrectAnswer(splitAnswers)
+          parsedAnswer = splitAnswers
 
-            // Replace the parsedAnswer with the split array
-            console.log('Split multi-question answers by commas:', splitAnswers)
-            setCorrectAnswer(splitAnswers)
-            parsedAnswer = splitAnswers
-
-            // Update the gameState with the split answers
-            updateGameState({
-              correctAnswer: splitAnswers,
-            })
-          }
+          // Update the gameState with the split answers
+          updateGameState({
+            correctAnswer: splitAnswers,
+          })
         }
+      }
 
-        if (teamAnswerCorrect !== null) {
-          setIsCorrect(teamAnswerCorrect)
-
-          // Determine the appropriate message based on question type
-          const lightningMessage = teamAnswerCorrect
-            ? 'Lightning Bonus! You earned points!'
-            : 'Incorrect lightning answer.'
-
-          const halftimeBonusMessage = teamAnswerCorrect
-            ? `Halftime Bonus! You earned ${pointsEarned} ${
-                pointsEarned === 1 ? 'point' : 'points'
-              }!`
-            : 'Incorrect halftime answer.'
-
-          const multiQuestionMessage = teamAnswerCorrect
-            ? `You got ${pointsEarned} ${
-                pointsEarned === 1 ? 'answer' : 'answers'
-              } correct!`
-            : 'No correct answers.'
-
-          const regularMessage = teamAnswerCorrect
+      if (teamAnswerCorrect !== null) {
+        setIsCorrect(teamAnswerCorrect)
+        setOverlayMessage(
+          isLightningQuestion
+            ? teamAnswerCorrect
+              ? 'Lightning Bonus! You earned points!'
+              : 'Incorrect lightning answer.'
+            : isHalftimeBonus
+            ? teamAnswerCorrect
+              ? 'Halftime Bonus! You earned points!'
+              : 'Incorrect halftime answer.'
+            : isMultiQuestion
+            ? teamAnswerCorrect
+              ? `You got ${gameState.scoreChange || 0} ${gameState.scoreChange === 1 ? 'answer' : 'answers'} correct!`
+              : 'No correct answers.'
+            : teamAnswerCorrect
             ? `Congratulations! You won ${
                 gameState.lastSubmittedWager || selectedWager || 0
               } points!`
             : `Ope! You lost ${
                 gameState.lastSubmittedWager || selectedWager || 0
               } points.`
-
-          console.log('Setting overlay message for:', {
-            isLightningQuestion,
-            isHalftimeBonusType,
-            isMultiQuestionType,
-            pointsEarned,
-            teamAnswerCorrect,
-          })
-
-          let message
-          if (isLightningQuestion) {
-            message = lightningMessage
-          } else if (isHalftimeBonusType) {
-            message = halftimeBonusMessage
-          } else if (isMultiQuestionType) {
-            message = multiQuestionMessage
-          } else {
-            message = regularMessage
-          }
-
-          setOverlayMessage(message)
-          setShowOverlay(true)
-          setTimeout(() => {
-            setShowOverlay(false)
-            setTeamAnswerCorrect(null)
-          }, 5000)
-        }
-
-        setAnsweredQuestions((prev) => new Set(prev).add(questionId))
-        updateGameState({
-          currentQuestionId: questionId,
-          correctAnswer: Array.isArray(parsedAnswer)
-            ? parsedAnswer
-            : `${parsedAnswer || ''}`,
-          currentPhase: 'reveal',
-          timeLeft: 0,
-          questionType: isLightningQuestion
-            ? 'lightning'
-            : isHalftimeBonus
-            ? 'halftimeBonus'
-            : questionType,
-          revealInfo: {
-            round: currentRound,
-            questionNumber: currentQuestionNumber,
-            isLightning: isLightningQuestion,
-            isHalftimeBonus: isHalftimeBonus,
-          },
-        })
-
-        setHasReceivedAnswer(true)
-        setHasSignaledReady(false)
-        if (timeoutRef.current) clearTimeout(timeoutRef.current)
+        )
+        setShowOverlay(true)
+        setTimeout(() => {
+          setShowOverlay(false)
+          setTeamAnswerCorrect(null)
+        }, 5000)
       }
-    )
+
+      setAnsweredQuestions((prev) => new Set(prev).add(questionId))
+      updateGameState({
+        currentQuestionId: questionId,
+        correctAnswer: Array.isArray(parsedAnswer)
+          ? parsedAnswer
+          : `${parsedAnswer || ''}`,
+        currentPhase: 'reveal',
+        timeLeft: 0,
+        questionType: isLightningQuestion
+          ? 'lightning'
+          : isHalftimeBonus
+          ? 'halftimeBonus'
+          : questionType,
+        revealInfo: {
+          round: currentRound,
+          questionNumber: currentQuestionNumber,
+          isLightning: isLightningQuestion,
+          isHalftimeBonus: isHalftimeBonus,
+        },
+      })
+
+      setHasReceivedAnswer(true)
+      setHasSignaledReady(false)
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    })
 
     connection.on('Question', (qData) => {
       console.log('Question event received:', qData)
@@ -929,7 +823,6 @@ const Game = ({
           setAnswerOptions(questionsData)
           const initialAnswers = Object.fromEntries(
             Object.keys(questionsData).map((qid) => [qid, ''])
-          )
           setAnswer(JSON.stringify(initialAnswers))
           setSelectedWager(0)
 
@@ -958,55 +851,18 @@ const Game = ({
 
     connection.on(
       'AnswerSubmitted',
-      ({ teamId: submittedTeamId, isCorrect, points }) => {
+      ({ teamId: submittedTeamId, isCorrect, scoreChange }) => {
         console.log(
-          `Team ${submittedTeamId} answer submitted. Correct: ${isCorrect}, Points: ${points}`
+          `Team ${submittedTeamId} answer submitted. Correct: ${isCorrect}, ScoreChange: ${scoreChange}`
         )
         if (submittedTeamId === teamId) {
           // Set team answer correctness first, BEFORE changing phase
           setTeamAnswerCorrect(isCorrect)
-
-          // Only store scoreChange for halftime bonus and multi-question types
-          const questionType = gameState.questionType || 'regular'
-          console.log('AnswerSubmitted - question type:', questionType)
-
-          const isHalftimeBonusAnswer =
-            questionType === 'halftimeBonus' ||
-            (questionType !== 'lightning' &&
-              questionType !== 'finalWager' &&
-              typeof gameState.question?.text === 'string' &&
-              gameState.question.text.toLowerCase().includes('halftime bonus'))
-
-          const isMultiQuestionAnswer =
-            questionType === 'multiQuestion' ||
-            (questionType !== 'lightning' &&
-              questionType !== 'finalWager' &&
-              questionType !== 'halftimeBonus' &&
-              typeof gameState.question?.text === 'string' &&
-              (gameState.question.text
-                .toLowerCase()
-                .includes('fill in the blank') ||
-                gameState.question?.round === 5))
-
-          console.log('AnswerSubmitted type diagnosis:', {
-            questionType,
-            isHalftimeBonusAnswer,
-            isMultiQuestionAnswer,
-            points,
-            stateScoreChange: gameState.scoreChange,
+          
+          // Store the score change for overlay message
+          updateGameState({
+            scoreChange: scoreChange
           })
-
-          if (
-            (isHalftimeBonusAnswer || isMultiQuestionAnswer) &&
-            points !== undefined
-          ) {
-            console.log(`Storing points ${points} in gameState.scoreChange`)
-            // Update with functional form to avoid state dependencies
-            updateGameState((prevState) => ({
-              ...prevState,
-              scoreChange: points,
-            }))
-          }
 
           // Record this question as answered
           if (gameState.currentQuestionId) {
@@ -1918,7 +1774,7 @@ const Game = ({
           questionTextLower.includes('lightning')
         : false
 
-    const isFinalQuestion = gameState.questionType.includes('final')
+    const isFinalQuestion = questionType.includes('final')
     // questionTextLower.includes('final') ||
     // extractedNumber === 25 ||
     // extractedNumber === 24

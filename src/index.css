@@ -271,3 +271,124 @@ button:focus-visible {
     }
   }
 }
+
+/* Halftime Break Timer Styles */
+.timer-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 20px 0;
+}
+
+.big-timer {
+  font-size: 4rem;
+  font-weight: bold;
+  color: #2c3e50;
+  background-color: #ecf0f1;
+  padding: 15px 30px;
+  border-radius: 10px;
+  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+  font-family: monospace;
+  letter-spacing: 2px;
+  animation: pulse 1s infinite alternate;
+}
+
+@keyframes pulse {
+  from {
+    transform: scale(1);
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+  }
+  to {
+    transform: scale(1.03);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+  }
+}
+
+/* Additional styles for the halftime break page */
+.halftime-message {
+  font-size: 1.5rem;
+  margin: 15px 0;
+  text-align: center;
+  color: #555;
+}
+
+/* Operator Dashboard Controls */
+.operator-actions {
+  background-color: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 15px;
+  margin: 15px 0;
+}
+
+.operator-actions h3 {
+  margin-top: 0;
+  color: #343a40;
+  border-bottom: 1px solid #dee2e6;
+  padding-bottom: 8px;
+  margin-bottom: 15px;
+}
+
+.skip-question-button {
+  background-color: #dc3545;
+  color: white;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.skip-question-button:hover {
+  background-color: #c82333;
+}
+
+.skip-question-button:disabled {
+  background-color: #6c757d;
+  cursor: not-allowed;
+}
+
+.hint {
+  font-size: 0.9rem;
+  color: #6c757d;
+  margin-top: 10px;
+  font-style: italic;
+}
+
+/* Halftime answer list styles */
+.correct-answer-display {
+  margin: 15px 0;
+  padding: 10px;
+  background-color: #f8f9fa;
+  border-radius: 5px;
+  border-left: 5px solid #28a745;
+}
+
+.halftime-answer-list {
+  margin: 0;
+  padding: 0 0 0 20px;
+}
+
+.halftime-answer-list li {
+  margin: 5px 0;
+  padding: 3px 0;
+}
+
+.halftime-answer-input {
+  display: flex;
+  margin-bottom: 10px;
+  align-items: center;
+}
+
+.halftime-answer-input label {
+  min-width: 30px;
+  margin-right: 10px;
+}
+
+.halftime-answer-input input {
+  flex: 1;
+  padding: 8px;
+  border-radius: 4px;
+  border: 1px solid #ced4da;
+}

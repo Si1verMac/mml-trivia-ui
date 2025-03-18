@@ -22,6 +22,7 @@ const OperatorDashboard = ({
   const [correctAnswer, setCorrectAnswer] = useState(null)
   const [gamePhase, setGamePhase] = useState('unknown')
   const [questionText, setQuestionText] = useState('')
+  const [isProcessing, setIsProcessing] = useState(false)
   const decoded = jwtDecode(token)
   const teamId = parseInt(decoded.teamId, 10)
   const previousGameIdRef = useRef(null)
@@ -30,6 +31,7 @@ const OperatorDashboard = ({
   useEffect(() => {
     const fetchGames = async () => {
       try {
+        // Fetch all games instead of just active ones
         const response = await axios.get(
           'https://localhost:7169/api/game/all',
           {
@@ -195,6 +197,43 @@ const OperatorDashboard = ({
     }
   }
 
+  // Handle skip question
+  const handleSkipQuestion = async () => {
+    if (!localGameId || !connection) {
+      alert('No game selected or no connection available')
+      return
+    }
+
+    if (gamePhase !== 'question') {
+      alert('Cannot skip question - game is not in question phase')
+      return
+    }
+
+    setIsProcessing(true)
+    try {
+      // First, signal that the timer has expired for the current question
+      await connection.invoke(
+        'HandleTimerExpiry',
+        localGameId,
+        gameState.currentQuestionId
+      )
+      console.log('Sent timer expiry signal to skip current question')
+
+      // Skip the SignalReadyForNext call which is redundant and causes double-skipping
+
+      // Directly request the next question
+      await connection.invoke('RequestNextQuestion', localGameId)
+      console.log('Requested next question')
+
+      alert('Successfully skipped to next question')
+    } catch (err) {
+      console.error('Error skipping question:', err)
+      alert(`Failed to skip question: ${err.message}`)
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+
   return (
     <div className='operator-dashboard'>
       <h2>Operator Dashboard</h2>
@@ -218,6 +257,25 @@ const OperatorDashboard = ({
         </label>
       </div>
       <p>Current Phase: {gamePhase}</p>
+
+      {/* Add Skip Question button */}
+      {gamePhase === 'question' && localGameId && (
+        <div className='operator-actions'>
+          <h3>Operator Controls</h3>
+          <button
+            className='skip-question-button'
+            onClick={handleSkipQuestion}
+            disabled={isProcessing}
+          >
+            {isProcessing ? 'Processing...' : 'Skip to Next Question'}
+          </button>
+          <p className='hint'>
+            Use this to quickly test special question types like Lightning and
+            Halftime Bonus.
+          </p>
+        </div>
+      )}
+
       {gamePhase === 'question' && questionText && (
         <div>
           <h3>Current Question</h3>

@@ -27,15 +27,34 @@ function App() {
 
   // Simplified game state management with persistence
   const [gameState, setGameState] = useState(() => {
-    const savedState = localStorage.getItem('gameState')
-    return savedState
-      ? JSON.parse(savedState)
-      : {
+    try {
+      const savedState = localStorage.getItem('gameState')
+      const parsedState = savedState ? JSON.parse(savedState) : null
+      console.log(
+        'Initial gameState loaded from localStorage:',
+        parsedState ? 'Found' : 'Not found'
+      )
+      return (
+        parsedState || {
           currentPhase: 'idle',
-          currentQuestionId: null,
+          timeLeft: 0,
           question: null,
           correctAnswer: null,
+          currentQuestionId: null,
+          preservedFromToggle: false,
         }
+      )
+    } catch (error) {
+      console.error('Error parsing gameState from localStorage:', error)
+      return {
+        currentPhase: 'idle',
+        timeLeft: 0,
+        question: null,
+        correctAnswer: null,
+        currentQuestionId: null,
+        preservedFromToggle: false,
+      }
+    }
   })
 
   // Persist gameId and gameState to localStorage
@@ -45,10 +64,21 @@ function App() {
   }, [gameId, gameState])
 
   // Function to update game state that preserves unchanged values
-  const updateGameState = useCallback((updates) => {
+  const updateGameState = useCallback((update) => {
+    console.log('updateGameState called with:', update)
     setGameState((prevState) => {
-      const newState = { ...prevState, ...updates }
-      return newState
+      const newState =
+        typeof update === 'function'
+          ? update(prevState)
+          : { ...prevState, ...update }
+      try {
+        localStorage.setItem('gameState', JSON.stringify(newState))
+        console.log('Successfully updated gameState and saved to localStorage')
+        return newState
+      } catch (error) {
+        console.error('Error saving gameState to localStorage:', error)
+        return newState
+      }
     })
   }, [])
 
@@ -191,6 +221,10 @@ function App() {
   }
 
   const handleLogin = (newToken) => {
+    console.log(
+      'handleLogin called with token:',
+      newToken.substring(0, 20) + '...'
+    )
     localStorage.setItem('token', newToken)
     setToken(newToken)
     setError('')
@@ -209,21 +243,71 @@ function App() {
   }
 
   const toggleDashboard = () => {
+    // Store the current game state before switching views
+    const currentGameState = {
+      ...gameState,
+      preservedFromToggle: true,
+    }
+
+    console.log(
+      `Toggling dashboard. Current timeLeft: ${gameState.timeLeft || 0} seconds`
+    )
+
+    // Toggle dashboard view
     setShowDashboard((prev) => {
       const newValue = !prev
       localStorage.setItem('showDashboard', JSON.stringify(newValue))
+
+      // If switching back to game view from dashboard, ensure we preserve state
+      if (prev === true && connection) {
+        console.log(
+          `Switching back to game view with preserved state. Preserved timeLeft: ${
+            currentGameState.timeLeft || 0
+          } seconds`
+        )
+        updateGameState(currentGameState)
+      }
+
       return newValue
     })
   }
 
+  // Clear preservedFromToggle flag after it has been used
+  useEffect(() => {
+    console.log('Starting preservedFromToggle effect. Current state:', {
+      preservedFromToggle: gameState.preservedFromToggle,
+      showDashboard,
+      token,
+    })
+
+    if (gameState.preservedFromToggle && !showDashboard) {
+      // Only set a timer to clear the flag once the game view is rendered
+      try {
+        const timer = setTimeout(() => {
+          console.log('Clearing preservedFromToggle flag')
+          // Use functional update to prevent using stale state
+          updateGameState((prevState) => ({
+            ...prevState,
+            preservedFromToggle: false,
+          }))
+        }, 3000) // Give ample time for components to use the flag
+
+        return () => clearTimeout(timer)
+      } catch (error) {
+        console.error('Error in preservedFromToggle effect:', error)
+      }
+    }
+  }, [gameState.preservedFromToggle, showDashboard, updateGameState])
+
   if (!token) {
+    console.log('No token found, rendering login/register screens')
     return (
       <div className='main-container'>
         <Header />
         {isRegistering ? (
           <Register onRegisterSuccess={handleRegisterSuccess} />
         ) : (
-          <Login onLogin={handleLogin} error={error} setError={setError} />
+          <Login onLogin={handleLogin} />
         )}
         <button onClick={() => setIsRegistering(!isRegistering)}>
           {isRegistering ? 'Go to Login' : 'Go to Register'}
